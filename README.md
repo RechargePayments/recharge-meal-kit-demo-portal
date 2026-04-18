@@ -28,6 +28,7 @@ API calls are made server-side only — the Recharge API key is never exposed to
 - Node.js 18+
 - A Recharge **staging** merchant API key (2021-11 version)
 - A customer ID that lives on that merchant's store
+- A Shopify Partner app with `read_products` scope installed on the store (see Shopify setup below)
 
 ## Setup
 
@@ -43,9 +44,24 @@ cp .env.example .env
 
 | Variable | Description |
 |----------|-------------|
-| `RECHARGE_API_KEY` | Staging merchant API key (`sk_test_2x2_...` format) |
+| `RECHARGE_API_KEY` | Staging merchant API key (`sk_test_1x1_...` format) |
 | `RECHARGE_CUSTOMER_ID` | Numeric ID of the customer to display |
 | `RECHARGE_API_URL` | `https://api.stage.rechargeapps.com` |
+| `RECHARGE_ADMIN_URL` | `https://<store-subdomain>.admin.stage.rechargeapps.com` |
+| `SHOPIFY_STORE_DOMAIN` | Shopify store domain, e.g. `your-store.myshopify.com` |
+| `SHOPIFY_CLIENT_ID` | Client ID from the Shopify Partner Dashboard app |
+| `SHOPIFY_CLIENT_SECRET` | Client secret (`shpss_...`) from the Shopify Partner Dashboard app |
+
+### Shopify setup
+
+The bundle editor fetches available products from Shopify collections. This requires a Shopify Partner app with the client credentials grant enabled:
+
+1. Go to [dev.shopify.com](https://dev.shopify.com) → your app → **Configuration**
+2. Add API scopes: `read_products`, `read_product_listings`
+3. Create a new version, release it, and reinstall the app on your store
+4. Copy the **Client ID** and **Client Secret** (`shpss_...`) into `.env`
+
+The portal exchanges these credentials for a short-lived access token at runtime (expires every 24 h) and caches it in memory. No OAuth redirect flow is needed.
 
 ## Running
 
@@ -64,6 +80,7 @@ future-charge-manipulation-demo-portal/
 │   │   └── charges.$id.tsx     # Charge detail + bundle selection editor
 │   ├── lib/
 │   │   ├── recharge.server.ts  # Typed Recharge API client (server-side only)
+│   │   ├── shopify.server.ts   # Shopify client — token exchange, caching, collection product fetch
 │   │   ├── types.ts            # Zod schemas for Customer, Subscription, Charge, BundleSelection
 │   │   └── utils.ts            # formatDate, formatCurrency, shortId helpers
 │   ├── root.tsx                # Layout + error boundary
@@ -86,7 +103,7 @@ All calls use `X-Recharge-Version: 2021-11`.
 | GET | `/subscriptions?customer_id=:id&status=active` | Active subscription list |
 | GET | `/charges?customer_id=:id&status=queued` | All queued charges |
 | POST | `/charges/:id/skip` | Skip a queued charge |
-| GET | `/bundle_selections?purchase_item_ids=:id` | Bundle selections per charge |
+| GET | `/bundle_selections?charge_ids=:id` | Bundle selections per charge |
 | PUT | `/bundle_selections/:id` | Update bundle selections |
 
 ## Key Feature Behaviors

@@ -109,7 +109,7 @@ All calls use `X-Recharge-Version: 2021-11`.
 ## Key Feature Behaviors
 
 - **Multiple queued charges:** A single subscription can have 2–6 QUEUED charges, one per upcoming billing cycle. The dashboard groups them by subscription in date order.
-- **Skip:** Skipping a queued charge triggers creation of a new replacement charge one interval after the furthest queued charge. MVP blocks skipping charges that don't yet exist as QUEUED records.
+- **Skip:** Skipping a queued charge marks it as skipped — no replacement charge is created immediately. Charges are replenished up to the `max_queued_charges` limit when the recurring charge creation job next runs. Merchants configure the job schedule via `charge_creation_day_of_week` or `charge_creation_day_of_month` on the plan; subscriptions inherit these properties from the plan at creation time.
 - **Bundle editing:** Each queued charge can have its bundle contents edited independently via the charge detail page.
 - **Auto-refresh:** The dashboard polls every 30 seconds via Remix's `useRevalidator`.
 

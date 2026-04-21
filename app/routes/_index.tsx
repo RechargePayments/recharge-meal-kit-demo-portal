@@ -186,7 +186,7 @@ function SubscriptionCard({
             <span className="text-xs font-medium text-gray-400 uppercase tracking-wide text-center">Status</span>
             <span />
           </div>
-          <div className="divide-y divide-gray-50">
+          <div className="divide-y divide-gray-200">
             {charges.map((charge) => (
               <ChargeRow key={charge.id} charge={charge} subscriptionId={subscription.id} />
             ))}
@@ -227,13 +227,18 @@ function ChargeRow({
   const lineItemsToShow = ownLineItems.length > 0 ? ownLineItems : charge.line_items;
 
   return (
-    <div className="px-5 py-3 grid grid-cols-[1fr_80px_72px_120px] gap-3 items-center hover:bg-gray-50/60 transition-colors">
+    <div className="px-5 py-3 grid grid-cols-[1fr_80px_72px_120px] gap-3 items-start hover:bg-gray-50/60 transition-colors">
       {/* Date + items summary */}
       <div className="min-w-0">
         <p className="text-sm font-medium text-gray-800">{formatDate(charge.scheduled_at)}</p>
-        <p className="text-xs text-gray-400 mt-0.5 truncate">
-          {lineItemsToShow.map((li) => `${li.quantity}× ${li.title}`).join(", ")}
-        </p>
+        <ul className="mt-1 space-y-0.5">
+          {lineItemsToShow.map((li, i) => (
+            <li key={i} className="text-xs text-gray-500 flex items-baseline gap-1.5">
+              <span className="font-medium text-gray-700 tabular-nums">{li.quantity}×</span>
+              <span>{li.title}</span>
+            </li>
+          ))}
+        </ul>
       </div>
 
       {/* Amount */}

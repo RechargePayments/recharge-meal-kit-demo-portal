@@ -73,8 +73,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
 
   if (intent === "skip") {
+    const customerId = formData.get("customerId");
     await skipCharge(params.id!);
-    return redirect("/");
+    return redirect(typeof customerId === "string" && customerId ? `/${customerId}` : "/");
   }
 
   return json({ error: "Unknown intent" }, { status: 400 });
@@ -86,6 +87,8 @@ export default function ChargePage() {
   const { charge, bundleSelections, subscriptionTitles, collectionsByProductId } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
+  const customerId = charge.customer_id ? String(charge.customer_id) : null;
+  const backUrl = customerId ? `/${customerId}` : "/";
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -107,7 +110,7 @@ export default function ChargePage() {
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-5">
         {/* Back */}
         <Link
-          to="/"
+          to={backUrl}
           className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800 group"
         >
           <svg
@@ -149,6 +152,7 @@ export default function ChargePage() {
           <div className="flex justify-center pt-2 pb-4">
             <skipFetcher.Form method="post">
               <input type="hidden" name="intent" value="skip" />
+              {customerId && <input type="hidden" name="customerId" value={customerId} />}
               <button
                 type="submit"
                 disabled={isSkipping}

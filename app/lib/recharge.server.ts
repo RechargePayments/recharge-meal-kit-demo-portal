@@ -121,6 +121,21 @@ export async function getBundleCollectionsFromShopify(collectionIds: string[]): 
   return z.array(BundleCollectionSchema).parse(collections);
 }
 
+export async function getBundleProductCollectionIds(externalProductId: string): Promise<string[]> {
+  const data = await api<{
+    bundle_products: Array<{
+      variants: Array<{
+        option_sources: Array<{ option_source_id: string }>;
+      }>;
+    }>;
+  }>(`/bundle_products?external_product_id=${externalProductId}&limit=25`);
+
+  const ids = data.bundle_products.flatMap((bp) =>
+    bp.variants.flatMap((v) => v.option_sources.map((os) => os.option_source_id))
+  );
+  return [...new Set(ids)];
+}
+
 export async function updateBundleSelection(
   bundleSelectionId: number,
   items: BundleItemPayload[]

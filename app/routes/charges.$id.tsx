@@ -4,6 +4,7 @@ import { Link, useFetcher, useLoaderData } from "@remix-run/react";
 import { useState } from "react";
 import {
   getBundleCollectionsFromShopify,
+  getBundleProductCollectionIds,
   getBundleSelections,
   getCharge,
   getSubscription,
@@ -33,7 +34,12 @@ export async function loader({ params }: LoaderFunctionArgs) {
     subscriptions.map((s) => [s.id, s.product_title])
   );
 
-  const collectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
+  // Fetch the full set of available collection IDs from the bundle product configuration so
+  // de-selected items remain in the list even after Recharge strips them from the selection.
+  const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
+  const bundleProductCollectionIds = await Promise.all(uniqueProductIds.map(getBundleProductCollectionIds));
+  const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
+  const collectionIds = [...new Set([...selectionCollectionIds, ...bundleProductCollectionIds.flat()])];
   const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
   const collectionsByProductId = Object.fromEntries(
     [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))].map(
@@ -67,8 +73,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
 
   if (intent === "skip") {
+    const customerId = formData.get("customerId");
     await skipCharge(params.id!);
-    return redirect("/");
+    return redirect(typeof customerId === "string" && customerId ? `/${customerId}` : "/");
   }
 
   return json({ error: "Unknown intent" }, { status: 400 });
@@ -80,6 +87,8 @@ export default function ChargePage() {
   const { charge, bundleSelections, subscriptionTitles, collectionsByProductId } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
+  const customerId = charge.customer_id ? String(charge.customer_id) : null;
+  const backUrl = customerId ? `/${customerId}` : "/";
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -101,7 +110,7 @@ export default function ChargePage() {
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-5">
         {/* Back */}
         <Link
-          to="/"
+          to={backUrl}
           className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800 group"
         >
           <svg
@@ -123,7 +132,7 @@ export default function ChargePage() {
           bundleSelections.map((bs) => {
             return (
               <BundleEditor
-                key={`${bs.id}-${bs.updated_at}`}
+                key={bs.id}
                 bundleSelection={bs}
                 chargeIsQueued={charge.status === "queued"}
                 subscriptionTitle={subscriptionTitles[bs.purchase_item_id] ?? `Subscription #${bs.purchase_item_id}`}
@@ -143,6 +152,7 @@ export default function ChargePage() {
           <div className="flex justify-center pt-2 pb-4">
             <skipFetcher.Form method="post">
               <input type="hidden" name="intent" value="skip" />
+              {customerId && <input type="hidden" name="customerId" value={customerId} />}
               <button
                 type="submit"
                 disabled={isSkipping}
@@ -268,7 +278,11 @@ function buildEditableItems(
     }
   }
 
-  return result;
+  return result.sort((a, b) => {
+    if (a.quantity > 0 && b.quantity === 0) return -1;
+    if (a.quantity === 0 && b.quantity > 0) return 1;
+    return 0;
+  });
 }
 
 function BundleEditor({
@@ -287,6 +301,9 @@ function BundleEditor({
   const [items, setItems] = useState<EditableItem[]>(() =>
     buildEditableItems(bundleSelection, availableCollections)
   );
+  const [savedQty, setSavedQty] = useState<Record<string, number>>(
+    () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
+  );
 
   const isSaving = fetcher.state !== "idle";
   const savedOk =
@@ -295,11 +312,8 @@ function BundleEditor({
     "intent" in fetcher.data &&
     fetcher.data.intent === "update_bundle";
 
-  const originalQty: Record<string, number> = Object.fromEntries(
-    bundleSelection.items.map((i) => [i.external_variant_id, i.quantity])
-  );
   const hasChanges = items.some((item) => {
-    const orig = originalQty[item.external_variant_id] ?? 0;
+    const orig = savedQty[item.external_variant_id] ?? 0;
     return item.quantity !== orig;
   });
 
@@ -312,6 +326,7 @@ function BundleEditor({
   };
 
   const handleSave = () => {
+    setSavedQty(Object.fromEntries(items.map((i) => [i.external_variant_id, i.quantity])));
     const payload = items
       .filter((item) => item.quantity > 0)
       .map(({ collection_id, collection_source, external_product_id, external_variant_id, quantity }) => ({

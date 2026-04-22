@@ -109,7 +109,7 @@ export default function ChargePage() {
   const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
-  const customerId = charge.customer_id ? String(charge.customer_id) : null;
+  const customerId = charge.customer?.id ? String(charge.customer.id) : null;
   const backUrl = customerId ? `/${customerId}` : "/";
 
   return (

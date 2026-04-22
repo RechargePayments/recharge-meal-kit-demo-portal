@@ -337,6 +337,8 @@ function BundleEditor({
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
   );
   const [errorDismissed, setErrorDismissed] = useState(false);
+  // Seed from loader; updated when the API error response includes ranges
+  const [knownRanges, setKnownRanges] = useState<number[][]>(quantityRanges);
   const submittedQtyRef = useRef<Record<string, number>>({});
 
   const isSaving = fetcher.state !== "idle";
@@ -355,8 +357,7 @@ function BundleEditor({
 
   const showError = fetcherError != null && !errorDismissed;
 
-  // Ranges from the loader (proactive) or from the error response (reactive)
-  const effectiveRanges = fetcherError?.ranges ?? quantityRanges;
+  const effectiveRanges = knownRanges;
   const rangeLabel = formatRangeLabel(effectiveRanges);
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
   const isValidTotal =
@@ -367,6 +368,11 @@ function BundleEditor({
     const orig = savedQty[item.external_variant_id] ?? 0;
     return item.quantity !== orig;
   });
+
+  // Persist ranges learned from error responses so the hint survives dismiss/re-save
+  useEffect(() => {
+    if (fetcherError?.ranges?.length) setKnownRanges(fetcherError.ranges);
+  }, [fetcherError]);
 
   // Reset dismissed state when a new save starts
   useEffect(() => {

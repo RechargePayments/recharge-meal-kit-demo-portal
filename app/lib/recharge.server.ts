@@ -134,7 +134,7 @@ export async function getBundleProductInfo(externalProductId: string): Promise<{
     bundle_products: Array<{
       variants: Array<{
         option_sources: Array<{ option_source_id: string }>;
-        quantity_ranges?: number[][];
+        ranges?: Array<{ id: number; quantity_min: number; quantity_max: number }>;
       }>;
     }>;
   }>(`/bundle_products?external_product_id=${externalProductId}&limit=25`);
@@ -147,15 +147,15 @@ export async function getBundleProductInfo(externalProductId: string): Promise<{
     ),
   ];
 
-  const seen = new Set<string>();
+  const seenIds = new Set<number>();
   const quantityRanges = data.bundle_products
-    .flatMap((bp) => bp.variants.flatMap((v) => v.quantity_ranges ?? []))
+    .flatMap((bp) => bp.variants.flatMap((v) => v.ranges ?? []))
     .filter((r) => {
-      const key = JSON.stringify(r);
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (seenIds.has(r.id)) return false;
+      seenIds.add(r.id);
       return true;
-    });
+    })
+    .map((r) => [r.quantity_min, r.quantity_max]);
 
   return { collectionIds, quantityRanges };
 }

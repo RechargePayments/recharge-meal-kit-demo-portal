@@ -90,7 +90,7 @@ export const ChargeSchema = z.object({
   currency: z.string().nullable().optional(),
   line_items: z.array(ChargeLineItemSchema),
   has_uncommitted_changes: z.boolean().nullable().optional(),
-  customer_id: z.number().nullable().optional(),
+  customer: z.object({ id: z.number() }).nullable().optional(),
   address_id: z.number().nullable().optional(),
   error: z.string().nullable().optional(),
   error_type: z.string().nullable().optional(),

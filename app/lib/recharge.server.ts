@@ -122,18 +122,42 @@ export async function getBundleCollectionsFromShopify(collectionIds: string[]): 
 }
 
 export async function getBundleProductCollectionIds(externalProductId: string): Promise<string[]> {
+  const { collectionIds } = await getBundleProductInfo(externalProductId);
+  return collectionIds;
+}
+
+export async function getBundleProductInfo(externalProductId: string): Promise<{
+  collectionIds: string[];
+  quantityRanges: number[][];
+}> {
   const data = await api<{
     bundle_products: Array<{
       variants: Array<{
         option_sources: Array<{ option_source_id: string }>;
+        ranges?: Array<{ id: number; quantity_min: number; quantity_max: number }>;
       }>;
     }>;
   }>(`/bundle_products?external_product_id=${externalProductId}&limit=25`);
 
-  const ids = data.bundle_products.flatMap((bp) =>
-    bp.variants.flatMap((v) => v.option_sources.map((os) => os.option_source_id))
-  );
-  return [...new Set(ids)];
+  const collectionIds = [
+    ...new Set(
+      data.bundle_products.flatMap((bp) =>
+        bp.variants.flatMap((v) => v.option_sources.map((os) => os.option_source_id))
+      )
+    ),
+  ];
+
+  const seenIds = new Set<number>();
+  const quantityRanges = data.bundle_products
+    .flatMap((bp) => bp.variants.flatMap((v) => v.ranges ?? []))
+    .filter((r) => {
+      if (seenIds.has(r.id)) return false;
+      seenIds.add(r.id);
+      return true;
+    })
+    .map((r) => [r.quantity_min, r.quantity_max]);
+
+  return { collectionIds, quantityRanges };
 }
 
 export async function updateBundleSelection(

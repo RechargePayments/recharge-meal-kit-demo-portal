@@ -1,10 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData } from "@remix-run/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getBundleCollectionsFromShopify,
-  getBundleProductCollectionIds,
+  getBundleProductInfo,
   getBundleSelections,
   getCharge,
   getSubscription,
@@ -37,17 +37,20 @@ export async function loader({ params }: LoaderFunctionArgs) {
   // Fetch the full set of available collection IDs from the bundle product configuration so
   // de-selected items remain in the list even after Recharge strips them from the selection.
   const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
-  const bundleProductCollectionIds = await Promise.all(uniqueProductIds.map(getBundleProductCollectionIds));
+  const bundleProductInfoList = await Promise.all(uniqueProductIds.map(getBundleProductInfo));
   const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
-  const collectionIds = [...new Set([...selectionCollectionIds, ...bundleProductCollectionIds.flat()])];
+  const collectionIds = [
+    ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
+  ];
   const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
   const collectionsByProductId = Object.fromEntries(
-    [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))].map(
-      (pid) => [pid, availableCollections]
-    )
+    uniqueProductIds.map((pid) => [pid, availableCollections])
   ) as Record<string, typeof availableCollections>;
+  const bundleProductRangesByProductId = Object.fromEntries(
+    uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
+  ) as Record<string, number[][]>;
 
-  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId });
+  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -68,8 +71,27 @@ export async function action({ request, params }: ActionFunctionArgs) {
         "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity"
       >
     >;
-    await updateBundleSelection(Number(rawId), items);
-    return json({ success: true, intent: "update_bundle" } as const);
+    try {
+      await updateBundleSelection(Number(rawId), items);
+      return json({ success: true, intent: "update_bundle" } as const);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : "Failed to update bundle.";
+      let message = "Failed to update bundle selection.";
+      let ranges: number[][] | undefined;
+      const colonIdx = raw.lastIndexOf(": ");
+      if (colonIdx !== -1) {
+        try {
+          const parsed = JSON.parse(raw.slice(colonIdx + 2)) as {
+            errors?: { message?: string; details?: { ranges?: number[][] } };
+          };
+          if (parsed.errors?.message) message = parsed.errors.message;
+          if (parsed.errors?.details?.ranges) ranges = parsed.errors.details.ranges;
+        } catch {
+          // not JSON — fall through to generic message
+        }
+      }
+      return json({ error: message, ranges, intent: "update_bundle" as const });
+    }
   }
 
   if (intent === "skip") {
@@ -84,10 +106,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ChargePage() {
-  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId } = useLoaderData<typeof loader>();
+  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
-  const customerId = charge.customer_id ? String(charge.customer_id) : null;
+  const customerId = charge.customer?.id ? String(charge.customer.id) : null;
   const backUrl = customerId ? `/${customerId}` : "/";
 
   return (
@@ -138,6 +160,7 @@ export default function ChargePage() {
                 subscriptionTitle={subscriptionTitles[bs.purchase_item_id] ?? `Subscription #${bs.purchase_item_id}`}
                 lineItems={charge.line_items}
                 availableCollections={bs.external_product_id ? (collectionsByProductId[bs.external_product_id] ?? []) : []}
+                quantityRanges={bs.external_product_id ? (bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
               />
             );
           })
@@ -285,17 +308,26 @@ function buildEditableItems(
   });
 }
 
+function formatRangeLabel(ranges: number[][]): string {
+  if (ranges.length === 0) return "";
+  const [min, max] = ranges[0];
+  if (min === max) return `Select exactly ${min} item${min !== 1 ? "s" : ""}`;
+  return `Select ${min}–${max} items`;
+}
+
 function BundleEditor({
   bundleSelection,
   chargeIsQueued,
   subscriptionTitle,
   availableCollections,
+  quantityRanges,
 }: {
   bundleSelection: BundleSelection;
   chargeIsQueued: boolean;
   subscriptionTitle: string;
   lineItems: Charge["line_items"];
   availableCollections: BundleCollection[];
+  quantityRanges: number[][];
 }) {
   const fetcher = useFetcher<typeof action>();
   const [items, setItems] = useState<EditableItem[]>(() =>
@@ -304,18 +336,53 @@ function BundleEditor({
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
   );
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  // Seed from loader; updated when the API error response includes ranges
+  const [knownRanges, setKnownRanges] = useState<number[][]>(quantityRanges);
+  const submittedQtyRef = useRef<Record<string, number>>({});
 
   const isSaving = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "update_bundle" }
+    | { error: string; ranges?: number[][]; intent: "update_bundle" }
+    | undefined;
+
   const savedOk =
-    fetcher.state === "idle" &&
-    fetcher.data != null &&
-    "intent" in fetcher.data &&
-    fetcher.data.intent === "update_bundle";
+    fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+
+  const fetcherError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? fetcherData
+      : null;
+
+  const showError = fetcherError != null && !errorDismissed;
+
+  const effectiveRanges = knownRanges;
+  const rangeLabel = formatRangeLabel(effectiveRanges);
+  const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
+  const isValidTotal =
+    effectiveRanges.length === 0 ||
+    effectiveRanges.some(([min, max]) => totalItems >= min && totalItems <= max);
 
   const hasChanges = items.some((item) => {
     const orig = savedQty[item.external_variant_id] ?? 0;
     return item.quantity !== orig;
   });
+
+  // Persist ranges learned from error responses so the hint survives dismiss/re-save
+  useEffect(() => {
+    if (fetcherError?.ranges?.length) setKnownRanges(fetcherError.ranges);
+  }, [fetcherError]);
+
+  // Reset dismissed state when a new save starts
+  useEffect(() => {
+    if (isSaving) setErrorDismissed(false);
+  }, [isSaving]);
+
+  // Only commit savedQty on confirmed success (not optimistically)
+  useEffect(() => {
+    if (savedOk) setSavedQty(submittedQtyRef.current);
+  }, [savedOk]);
 
   const adjustQty = (index: number, delta: number) => {
     setItems((prev) =>
@@ -326,7 +393,7 @@ function BundleEditor({
   };
 
   const handleSave = () => {
-    setSavedQty(Object.fromEntries(items.map((i) => [i.external_variant_id, i.quantity])));
+    submittedQtyRef.current = Object.fromEntries(items.map((i) => [i.external_variant_id, i.quantity]));
     const payload = items
       .filter((item) => item.quantity > 0)
       .map(({ collection_id, collection_source, external_product_id, external_variant_id, quantity }) => ({
@@ -348,11 +415,35 @@ function BundleEditor({
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      {/* Error banner */}
+      {showError && (
+        <div className="mx-4 mt-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3 flex items-start gap-3">
+          <svg className="w-4 h-4 text-red-500 flex-none mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p className="flex-1 text-sm text-red-800">{fetcherError.error}</p>
+          <button
+            onClick={() => setErrorDismissed(true)}
+            aria-label="Dismiss error"
+            className="flex-none text-red-400 hover:text-red-600 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
         <div>
           <h2 className="font-semibold text-gray-900">Bundle Selection</h2>
           <p className="text-sm text-gray-500 mt-0.5">{subscriptionTitle}</p>
+          {rangeLabel && chargeIsQueued && (
+            <p className={`text-xs mt-1.5 font-medium ${isValidTotal ? "text-gray-400" : "text-amber-600"}`}>
+              {rangeLabel} · {totalItems} selected
+            </p>
+          )}
         </div>
         <span className="text-xs text-gray-400 flex-none">ID #{bundleSelection.id}</span>
       </div>

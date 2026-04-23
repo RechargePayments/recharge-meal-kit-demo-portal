@@ -1,0 +1,16 @@
+{
+  "preferences": {
+    "246948096": {
+      "include": [],
+      "exclude": ["Dairy"]
+    },
+    "246947699": {
+      "include": ["Gluten Free"],
+      "exclude": ["Gluten"]
+    },
+    "246945959": {
+      "include": ["Vegetarian"],
+      "exclude": []
+    }
+  }
+}

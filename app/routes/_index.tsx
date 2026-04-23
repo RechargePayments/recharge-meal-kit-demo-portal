@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
 import { redirect } from "@remix-run/node";
-import { Form } from "@remix-run/react";
+import { Form, Link } from "@remix-run/react";
 
 export const meta: MetaFunction = () => [{ title: "Future Charge Portal — Demo" }];
 
@@ -40,6 +40,14 @@ export default function Index() {
             Go
           </button>
         </Form>
+        <div className="mt-4 pt-4 border-t border-gray-100 text-center">
+          <Link
+            to="/merchant"
+            className="text-xs text-gray-400 hover:text-indigo-600 transition-colors"
+          >
+            Merchant portal →
+          </Link>
+        </div>
       </div>
     </div>
   );

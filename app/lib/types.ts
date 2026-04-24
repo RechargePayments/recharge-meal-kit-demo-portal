@@ -151,6 +151,7 @@ export const BundleCollectionProductSchema = z.object({
   external_product_id: z.string(),
   title: z.string(),
   image_url: z.string().nullable().optional(),
+  tags: z.array(z.string()).optional(),
   variants: z.array(BundleCollectionVariantSchema),
 });
 

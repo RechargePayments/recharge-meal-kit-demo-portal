@@ -36,10 +36,15 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (intent === "skip") {
     const chargeId = formData.get("chargeId");
+    const rawPurchaseItemId = formData.get("purchaseItemId");
     if (typeof chargeId !== "string") {
       return json({ error: "Missing chargeId" }, { status: 400 });
     }
-    const charge = await skipCharge(chargeId);
+    const purchaseItemIds =
+      typeof rawPurchaseItemId === "string" && rawPurchaseItemId
+        ? [Number(rawPurchaseItemId)]
+        : undefined;
+    const charge = await skipCharge(chargeId, purchaseItemIds);
     return json({ success: true, chargeId: charge.id });
   }
 
@@ -264,6 +269,7 @@ function ChargeRow({
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="skip" />
               <input type="hidden" name="chargeId" value={String(charge.id)} />
+              <input type="hidden" name="purchaseItemId" value={String(subscriptionId)} />
               <button
                 type="submit"
                 disabled={isSubmitting}

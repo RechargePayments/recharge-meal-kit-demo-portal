@@ -1,17 +1,21 @@
 import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
 import { redirect } from "@remix-run/node";
-import { Form } from "@remix-run/react";
+import { Form, Link, useActionData } from "@remix-run/react";
+import { getCustomerByEmail } from "~/lib/recharge.server";
 
 export const meta: MetaFunction = () => [{ title: "Future Charge Portal — Demo" }];
 
 export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
-  const customerId = formData.get("customerId");
-  if (typeof customerId !== "string" || !customerId.trim()) return null;
-  return redirect(`/${customerId.trim()}`);
+  const email = formData.get("email");
+  if (typeof email !== "string" || !email.trim()) return null;
+  const customer = await getCustomerByEmail(email.trim());
+  if (!customer) return { error: "No customer found with that email." };
+  return redirect(`/${customer.id}`);
 }
 
 export default function Index() {
+  const actionData = useActionData<typeof action>();
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 w-full max-w-sm">
@@ -24,12 +28,12 @@ export default function Index() {
           <span className="text-sm font-semibold text-gray-900">Subscription Portal</span>
           <span className="text-xs bg-amber-100 text-amber-700 font-medium px-1.5 py-0.5 rounded">Demo</span>
         </div>
-        <p className="text-sm text-gray-500 mb-6 mt-3">Enter a Recharge customer ID to get started.</p>
+        <p className="text-sm text-gray-500 mb-6 mt-3">Enter a customer email to get started.</p>
         <Form method="post" className="flex gap-2">
           <input
-            name="customerId"
-            type="text"
-            placeholder="e.g. 246712155"
+            name="email"
+            type="email"
+            placeholder="e.g. customer@example.com"
             autoFocus
             className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
@@ -40,6 +44,17 @@ export default function Index() {
             Go
           </button>
         </Form>
+        {actionData?.error && (
+          <p className="mt-3 text-xs text-red-600">{actionData.error}</p>
+        )}
+        <div className="mt-4 pt-4 border-t border-gray-100 text-center">
+          <Link
+            to="/merchant"
+            className="text-xs text-gray-400 hover:text-indigo-600 transition-colors"
+          >
+            Merchant portal →
+          </Link>
+        </div>
       </div>
     </div>
   );

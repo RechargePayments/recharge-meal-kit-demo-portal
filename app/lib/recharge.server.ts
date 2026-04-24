@@ -46,6 +46,12 @@ export async function getCustomer(customerId: string): Promise<Customer> {
   return CustomerSchema.parse(data.customer);
 }
 
+export async function getCustomerByEmail(email: string): Promise<Customer | null> {
+  const data = await api<{ customers: unknown[] }>(`/customers?email=${encodeURIComponent(email)}&limit=1`);
+  const customers = z.array(CustomerSchema).parse(data.customers);
+  return customers[0] ?? null;
+}
+
 // ─── Subscriptions ────────────────────────────────────────────────────────────
 
 export async function getSubscription(subscriptionId: number): Promise<Subscription> {
@@ -107,6 +113,7 @@ export async function getBundleCollectionsFromShopify(collectionIds: string[]): 
           external_product_id: String(p.id),
           title: p.title,
           image_url: p.image?.src ?? null,
+          tags: p.tags ?? [],
           variants: p.variants.map((v) => ({
             id: v.id,
             title: v.title,
@@ -160,6 +167,18 @@ export async function getBundleProductInfo(externalProductId: string): Promise<{
   return { collectionIds, quantityRanges };
 }
 
+export async function createBundleSelection(
+  chargeId: number,
+  purchaseItemId: number,
+  items: BundleItemPayload[]
+): Promise<BundleSelection> {
+  const data = await api<{ bundle_selection: unknown }>(`/bundle_selections`, {
+    method: "POST",
+    body: JSON.stringify({ charge_id: chargeId, purchase_item_id: purchaseItemId, items }),
+  });
+  return BundleSelectionSchema.parse(data.bundle_selection);
+}
+
 export async function updateBundleSelection(
   bundleSelectionId: number,
   items: BundleItemPayload[]
@@ -169,4 +188,34 @@ export async function updateBundleSelection(
     { method: "PUT", body: JSON.stringify({ items }) }
   );
   return BundleSelectionSchema.parse(data.bundle_selection);
+}
+
+// ─── Merchant defaults application ───────────────────────────────────────────
+
+// Shopify variant ID for the single variant of the Customizable Dynamic Weekly Bundle.
+// Fetching all subscriptions for this variant in one call avoids per-charge subscription
+// lookups. Future API improvement: a subscription_ids filter on the charges endpoint
+// would eliminate these lookups entirely and better support this merchant use case.
+const BUNDLE_VARIANT_ID = "47959488430339";
+
+export async function listBundleSubscriptionIds(): Promise<Set<number>> {
+  const data = await api<{ subscriptions: unknown[] }>(
+    `/subscriptions?external_variant_id=${BUNDLE_VARIANT_ID}&limit=250`
+  );
+  const subs = z.array(z.object({ id: z.number() })).parse(data.subscriptions);
+  return new Set(subs.map((s) => s.id));
+}
+
+export async function listQueuedChargesForWeek(weekStart: string): Promise<Charge[]> {
+  const end = new Date(weekStart + "T00:00:00");
+  end.setDate(end.getDate() + 6);
+  const weekEnd = [
+    end.getFullYear(),
+    String(end.getMonth() + 1).padStart(2, "0"),
+    String(end.getDate()).padStart(2, "0"),
+  ].join("-");
+  const data = await api<{ charges: unknown[] }>(
+    `/charges?status=queued&scheduled_at_min=${weekStart}&scheduled_at_max=${weekEnd}&limit=250`
+  );
+  return z.array(ChargeSchema).parse(data.charges);
 }

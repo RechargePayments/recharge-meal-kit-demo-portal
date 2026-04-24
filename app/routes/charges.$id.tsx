@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remi
 import { json, redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
+import { getCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import {
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
@@ -25,6 +26,9 @@ export async function loader({ params }: LoaderFunctionArgs) {
   if (!id) throw json({ error: "Missing charge ID" }, { status: 400 });
 
   const charge = await getCharge(id);
+
+  const customerId = charge.customer?.id ? String(charge.customer.id) : null;
+  const customerPreferences = getCustomerPreferences(customerId);
 
   const bundleSelections = await getBundleSelections(charge.id);
 
@@ -50,7 +54,7 @@ export async function loader({ params }: LoaderFunctionArgs) {
     uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
   ) as Record<string, number[][]>;
 
-  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId });
+  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -96,7 +100,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
   if (intent === "skip") {
     const customerId = formData.get("customerId");
-    await skipCharge(params.id!);
+    const chargeId = params.id!;
+
+    const [charge, bundleSelections] = await Promise.all([
+      getCharge(chargeId),
+      getBundleSelections(Number(chargeId)),
+    ]);
+
+    const purchaseItemIds =
+      bundleSelections.length > 0
+        ? [...new Set(bundleSelections.map((bs) => bs.purchase_item_id))]
+        : [...new Set(charge.line_items.map((li) => li.purchase_item_id).filter((id) => id > 0))];
+
+    await skipCharge(chargeId, purchaseItemIds);
     return redirect(typeof customerId === "string" && customerId ? `/${customerId}` : "/");
   }
 
@@ -106,7 +122,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ChargePage() {
-  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId } = useLoaderData<typeof loader>();
+  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
   const customerId = charge.customer?.id ? String(charge.customer.id) : null;
@@ -146,6 +162,11 @@ export default function ChargePage() {
           Back to subscriptions
         </Link>
 
+        {/* Preferences banner */}
+        {customerPreferences && (
+          <PreferencesBanner preferences={customerPreferences} />
+        )}
+
         {/* Charge summary card */}
         <ChargeCard charge={charge} />
 
@@ -161,6 +182,7 @@ export default function ChargePage() {
                 lineItems={charge.line_items}
                 availableCollections={bs.external_product_id ? (collectionsByProductId[bs.external_product_id] ?? []) : []}
                 quantityRanges={bs.external_product_id ? (bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
+                preferences={customerPreferences}
               />
             );
           })
@@ -187,6 +209,59 @@ export default function ChargePage() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// ─── Preferences banner ───────────────────────────────────────────────────────
+
+function PreferencesBanner({ preferences }: { preferences: CustomerPreference }) {
+  const hasIncludes = preferences.include.length > 0;
+  const hasExcludes = preferences.exclude.length > 0;
+  if (!hasIncludes && !hasExcludes) return null;
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4 space-y-2.5">
+      <div className="flex items-center gap-1.5">
+        <svg className="w-4 h-4 text-indigo-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
+          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+        </svg>
+        <span className="text-sm font-semibold text-gray-800">Your preferences</span>
+      </div>
+
+      {hasIncludes && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-medium text-gray-500 flex-none">Including</span>
+          {preferences.include.map((tag) => (
+            <span
+              key={tag}
+              className="inline-flex items-center gap-1 text-xs font-medium bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full"
+            >
+              <svg className="w-3 h-3 flex-none" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+              </svg>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {hasExcludes && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-medium text-gray-500 flex-none">Excluding</span>
+          {preferences.exclude.map((tag) => (
+            <span
+              key={tag}
+              className="inline-flex items-center gap-1 text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full"
+            >
+              <svg className="w-3 h-3 flex-none" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -252,11 +327,21 @@ type EditableItem = {
   productTitle: string;
   variantTitle: string;
   imageUrl: string | null;
+  tags: string[];
 };
+
+function tierOf(item: EditableItem, preferences: CustomerPreference | null): number {
+  if (item.quantity > 0) return 0;
+  if (!preferences) return 1;
+  if (matchesTags(item.tags, preferences.exclude)) return 3;
+  if (matchesTags(item.tags, preferences.include)) return 1;
+  return 2;
+}
 
 function buildEditableItems(
   bundleSelection: BundleSelection,
-  availableCollections: BundleCollection[]
+  availableCollections: BundleCollection[],
+  preferences: CustomerPreference | null
 ): EditableItem[] {
   const currentQty: Record<string, number> = {};
   for (const item of bundleSelection.items) {
@@ -280,6 +365,7 @@ function buildEditableItems(
           productTitle: product.title,
           variantTitle: variant.title,
           imageUrl: product.image_url ?? null,
+          tags: product.tags ?? [],
         });
       }
     }
@@ -297,15 +383,12 @@ function buildEditableItems(
         productTitle: `Product ${shortId(item.external_product_id)}`,
         variantTitle: `Variant ${shortId(item.external_variant_id)}`,
         imageUrl: null,
+        tags: [],
       });
     }
   }
 
-  return result.sort((a, b) => {
-    if (a.quantity > 0 && b.quantity === 0) return -1;
-    if (a.quantity === 0 && b.quantity > 0) return 1;
-    return 0;
-  });
+  return result.sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences));
 }
 
 function formatRangeLabel(ranges: number[][]): string {
@@ -315,12 +398,17 @@ function formatRangeLabel(ranges: number[][]): string {
   return `Select ${min}–${max} items`;
 }
 
+function matchesTags(itemTags: string[], prefTags: string[]): boolean {
+  return itemTags.some((t) => prefTags.some((p) => p.toLowerCase() === t.toLowerCase()));
+}
+
 function BundleEditor({
   bundleSelection,
   chargeIsQueued,
   subscriptionTitle,
   availableCollections,
   quantityRanges,
+  preferences,
 }: {
   bundleSelection: BundleSelection;
   chargeIsQueued: boolean;
@@ -328,10 +416,11 @@ function BundleEditor({
   lineItems: Charge["line_items"];
   availableCollections: BundleCollection[];
   quantityRanges: number[][];
+  preferences: CustomerPreference | null;
 }) {
   const fetcher = useFetcher<typeof action>();
   const [items, setItems] = useState<EditableItem[]>(() =>
-    buildEditableItems(bundleSelection, availableCollections)
+    buildEditableItems(bundleSelection, availableCollections, preferences)
   );
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
@@ -381,7 +470,10 @@ function BundleEditor({
 
   // Only commit savedQty on confirmed success (not optimistically)
   useEffect(() => {
-    if (savedOk) setSavedQty(submittedQtyRef.current);
+    if (savedOk) {
+      setSavedQty(submittedQtyRef.current);
+      setItems(prev => [...prev].sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences)));
+    }
   }, [savedOk]);
 
   const adjustQty = (index: number, delta: number) => {
@@ -453,7 +545,7 @@ function BundleEditor({
         {items.map((item, index) => (
           <div
             key={item.external_variant_id}
-            className={`px-5 py-3.5 flex items-center gap-4 ${item.quantity === 0 ? "opacity-40" : ""}`}
+            className={`px-5 py-3.5 flex items-center gap-4 ${item.quantity >= 1 ? "bg-indigo-50" : ""}`}
           >
             {/* Thumbnail */}
             {item.imageUrl ? (
@@ -468,7 +560,23 @@ function BundleEditor({
 
             {/* Identity */}
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-800">{item.productTitle}</p>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <p className="text-sm font-medium text-gray-800">{item.productTitle}</p>
+                {preferences && matchesTags(item.tags, preferences.include) && (
+                  <span title="Matches your preferences" className="flex-none">
+                    <svg className="w-3.5 h-3.5 text-green-500" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                    </svg>
+                  </span>
+                )}
+                {preferences && matchesTags(item.tags, preferences.exclude) && (
+                  <span title="Contains ingredients you want to avoid" className="flex-none">
+                    <svg className="w-3.5 h-3.5 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                  </span>
+                )}
+              </div>
               {item.variantTitle && item.variantTitle !== "Default Title" && (
                 <p className="text-xs text-gray-400 mt-0.5">{item.variantTitle}</p>
               )}

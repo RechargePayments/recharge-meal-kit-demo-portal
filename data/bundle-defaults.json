@@ -1,0 +1,96 @@
+{
+  "weeklyDefaults": {
+    "2026-04-27": [
+      {
+        "collection_id": "469572714755",
+        "collection_source": "shopify",
+        "external_product_id": "9374768922883",
+        "external_variant_id": "47956823408899",
+        "quantity": 1
+      },
+      {
+        "collection_id": "469572976899",
+        "collection_source": "shopify",
+        "external_product_id": "9374768365827",
+        "external_variant_id": "47956821311747",
+        "quantity": 2
+      },
+      {
+        "collection_id": "469572976899",
+        "collection_source": "shopify",
+        "external_product_id": "9374770921731",
+        "external_variant_id": "47956854669571",
+        "quantity": 1
+      }
+    ],
+    "2026-05-04": [
+      {
+        "collection_id": "469572714755",
+        "collection_source": "shopify",
+        "external_product_id": "9374771347715",
+        "external_variant_id": "47956855750915",
+        "quantity": 1
+      },
+      {
+        "collection_id": "469572976899",
+        "collection_source": "shopify",
+        "external_product_id": "9374770725123",
+        "external_variant_id": "47956853883139",
+        "quantity": 2
+      },
+      {
+        "collection_id": "469573042435",
+        "collection_source": "shopify",
+        "external_product_id": "9374770168067",
+        "external_variant_id": "47956851589379",
+        "quantity": 1
+      }
+    ],
+    "2026-05-11": [
+      {
+        "collection_id": "469572780291",
+        "collection_source": "shopify",
+        "external_product_id": "9374769905923",
+        "external_variant_id": "47956850475267",
+        "quantity": 1
+      },
+      {
+        "collection_id": "469572780291",
+        "collection_source": "shopify",
+        "external_product_id": "9374770626819",
+        "external_variant_id": "47956853784835",
+        "quantity": 2
+      },
+      {
+        "collection_id": "469573042435",
+        "collection_source": "shopify",
+        "external_product_id": "9374769348867",
+        "external_variant_id": "47956847689987",
+        "quantity": 1
+      }
+    ],
+    "2026-05-18": [
+      {
+        "collection_id": "469572780291",
+        "collection_source": "shopify",
+        "external_product_id": "9374770135299",
+        "external_variant_id": "47956851556611",
+        "quantity": 2
+      },
+      {
+        "collection_id": "469572780291",
+        "collection_source": "shopify",
+        "external_product_id": "9374769840387",
+        "external_variant_id": "47956850442499",
+        "quantity": 1
+      },
+      {
+        "collection_id": "469573042435",
+        "collection_source": "shopify",
+        "external_product_id": "9374771151107",
+        "external_variant_id": "47956855161091",
+        "quantity": 1
+      }
+    ]
+  }
+}

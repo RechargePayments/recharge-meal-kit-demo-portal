@@ -6,11 +6,15 @@
     },
     "246947699": {
       "include": ["Gluten Free"],
-      "exclude": ["Gluten"]
+      "exclude": ["Wheat"]
     },
     "246945959": {
       "include": ["Vegetarian"],
       "exclude": []
+    },
+    "247072512": {
+      "include": ["Gluten Free"],
+      "exclude": ["Wheat"]
     }
   }
 }

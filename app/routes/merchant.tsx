@@ -58,7 +58,14 @@ export async function loader() {
       eligible
         .map((c) => {
           const bc = bundleCollectionMap[String(c.id)];
-          return bc ? { ...bc, title: c.title } : null;
+          return bc
+            ? {
+                ...bc,
+                title: c.title,
+                availableFrom: c.availableFrom?.toISOString().slice(0, 10) ?? null,
+                availableUntil: c.availableUntil?.toISOString().slice(0, 10) ?? null,
+              }
+            : null;
         })
         .filter((c): c is NonNullable<typeof c> => c !== null),
     ])
@@ -231,6 +238,20 @@ function formatWeekRangeLabel(weekStart: string): string {
 
 // ─── Week editor ──────────────────────────────────────────────────────────────
 
+type CollectionWithDates = BundleCollection & {
+  availableFrom: string | null;
+  availableUntil: string | null;
+};
+
+function formatDateRange(from: string | null, until: string | null): string {
+  const fmt = (d: string) =>
+    new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  if (from && until) return `${fmt(from)} – ${fmt(until)}`;
+  if (from) return `From ${fmt(from)}`;
+  if (until) return `Until ${fmt(until)}`;
+  return "";
+}
+
 type EditableItem = {
   collection_id: string;
   collection_source: "shopify";
@@ -283,7 +304,7 @@ function WeekEditor({
   savedSelections,
 }: {
   weekStart: string;
-  collections: BundleCollection[];
+  collections: CollectionWithDates[];
   savedSelections: BundleItemPayload[];
 }) {
   const fetcher = useFetcher<typeof action>();
@@ -423,6 +444,11 @@ function WeekEditor({
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
                   {label}
                 </p>
+                {(collection.availableFrom || collection.availableUntil) && (
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {formatDateRange(collection.availableFrom, collection.availableUntil)}
+                  </p>
+                )}
               </div>
               {groupItems.map((item) => {
                 const index = items.indexOf(item);

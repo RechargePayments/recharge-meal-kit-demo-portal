@@ -46,6 +46,12 @@ export async function getCustomer(customerId: string): Promise<Customer> {
   return CustomerSchema.parse(data.customer);
 }
 
+export async function getCustomerByEmail(email: string): Promise<Customer | null> {
+  const data = await api<{ customers: unknown[] }>(`/customers?email=${encodeURIComponent(email)}&limit=1`);
+  const customers = z.array(CustomerSchema).parse(data.customers);
+  return customers[0] ?? null;
+}
+
 // ─── Subscriptions ────────────────────────────────────────────────────────────
 
 export async function getSubscription(subscriptionId: number): Promise<Subscription> {

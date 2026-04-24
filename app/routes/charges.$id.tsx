@@ -100,7 +100,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
   if (intent === "skip") {
     const customerId = formData.get("customerId");
-    await skipCharge(params.id!);
+    const chargeId = params.id!;
+
+    const [charge, bundleSelections] = await Promise.all([
+      getCharge(chargeId),
+      getBundleSelections(Number(chargeId)),
+    ]);
+
+    const purchaseItemIds =
+      bundleSelections.length > 0
+        ? [...new Set(bundleSelections.map((bs) => bs.purchase_item_id))]
+        : [...new Set(charge.line_items.map((li) => li.purchase_item_id).filter((id) => id > 0))];
+
+    await skipCharge(chargeId, purchaseItemIds);
     return redirect(typeof customerId === "string" && customerId ? `/${customerId}` : "/");
   }
 
@@ -318,9 +330,18 @@ type EditableItem = {
   tags: string[];
 };
 
+function tierOf(item: EditableItem, preferences: CustomerPreference | null): number {
+  if (item.quantity > 0) return 0;
+  if (!preferences) return 1;
+  if (matchesTags(item.tags, preferences.exclude)) return 3;
+  if (matchesTags(item.tags, preferences.include)) return 1;
+  return 2;
+}
+
 function buildEditableItems(
   bundleSelection: BundleSelection,
-  availableCollections: BundleCollection[]
+  availableCollections: BundleCollection[],
+  preferences: CustomerPreference | null
 ): EditableItem[] {
   const currentQty: Record<string, number> = {};
   for (const item of bundleSelection.items) {
@@ -367,11 +388,7 @@ function buildEditableItems(
     }
   }
 
-  return result.sort((a, b) => {
-    if (a.quantity > 0 && b.quantity === 0) return -1;
-    if (a.quantity === 0 && b.quantity > 0) return 1;
-    return 0;
-  });
+  return result.sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences));
 }
 
 function formatRangeLabel(ranges: number[][]): string {
@@ -403,7 +420,7 @@ function BundleEditor({
 }) {
   const fetcher = useFetcher<typeof action>();
   const [items, setItems] = useState<EditableItem[]>(() =>
-    buildEditableItems(bundleSelection, availableCollections)
+    buildEditableItems(bundleSelection, availableCollections, preferences)
   );
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
@@ -453,7 +470,10 @@ function BundleEditor({
 
   // Only commit savedQty on confirmed success (not optimistically)
   useEffect(() => {
-    if (savedOk) setSavedQty(submittedQtyRef.current);
+    if (savedOk) {
+      setSavedQty(submittedQtyRef.current);
+      setItems(prev => [...prev].sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences)));
+    }
   }, [savedOk]);
 
   const adjustQty = (index: number, delta: number) => {
@@ -525,7 +545,7 @@ function BundleEditor({
         {items.map((item, index) => (
           <div
             key={item.external_variant_id}
-            className={`px-5 py-3.5 flex items-center gap-4 ${item.quantity === 0 ? "opacity-40" : ""}`}
+            className={`px-5 py-3.5 flex items-center gap-4 ${item.quantity >= 1 ? "bg-indigo-50" : ""}`}
           >
             {/* Thumbnail */}
             {item.imageUrl ? (

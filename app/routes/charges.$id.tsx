@@ -12,8 +12,20 @@ import {
   skipCharge,
   updateBundleSelection,
 } from "~/lib/recharge.server";
+import {
+  filterCollectionsForWeek,
+  getCollectionsWithAvailability,
+} from "~/lib/shopify.server";
 import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge } from "~/lib/types";
 import { formatCurrency, formatDate, shortId } from "~/lib/utils";
+
+function getMondayOf(dateStr: string): string {
+  const d = new Date(dateStr.slice(0, 10) + "T00:00:00");
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? `Charge #${data.charge.id} — Demo` : "Charge — Demo" },
@@ -41,11 +53,18 @@ export async function loader({ params }: LoaderFunctionArgs) {
   // Fetch the full set of available collection IDs from the bundle product configuration so
   // de-selected items remain in the list even after Recharge strips them from the selection.
   const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
-  const bundleProductInfoList = await Promise.all(uniqueProductIds.map(getBundleProductInfo));
+  const [bundleProductInfoList, collectionsWithAvailability] = await Promise.all([
+    Promise.all(uniqueProductIds.map(getBundleProductInfo)),
+    getCollectionsWithAvailability(),
+  ]);
   const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
   const collectionIds = [
     ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
   ];
+  const weekStart = getMondayOf(charge.scheduled_at);
+  const eligibleCollectionIds = new Set(
+    filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id))
+  );
   const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
   const collectionsByProductId = Object.fromEntries(
     uniqueProductIds.map((pid) => [pid, availableCollections])
@@ -54,7 +73,7 @@ export async function loader({ params }: LoaderFunctionArgs) {
     uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
   ) as Record<string, number[][]>;
 
-  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences });
+  return json({ charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences, eligibleCollectionIds: [...eligibleCollectionIds] });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -122,7 +141,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ChargePage() {
-  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences } = useLoaderData<typeof loader>();
+  const { charge, bundleSelections, subscriptionTitles, collectionsByProductId, bundleProductRangesByProductId, customerPreferences, eligibleCollectionIds } = useLoaderData<typeof loader>();
   const skipFetcher = useFetcher();
   const isSkipping = skipFetcher.state !== "idle";
   const customerId = charge.customer?.id ? String(charge.customer.id) : null;
@@ -183,6 +202,7 @@ export default function ChargePage() {
                 availableCollections={bs.external_product_id ? (collectionsByProductId[bs.external_product_id] ?? []) : []}
                 quantityRanges={bs.external_product_id ? (bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
                 preferences={customerPreferences}
+                eligibleCollectionIds={eligibleCollectionIds}
               />
             );
           })
@@ -341,7 +361,8 @@ function tierOf(item: EditableItem, preferences: CustomerPreference | null): num
 function buildEditableItems(
   bundleSelection: BundleSelection,
   availableCollections: BundleCollection[],
-  preferences: CustomerPreference | null
+  preferences: CustomerPreference | null,
+  eligibleCollectionIds: Set<string>
 ): EditableItem[] {
   const currentQty: Record<string, number> = {};
   for (const item of bundleSelection.items) {
@@ -352,8 +373,11 @@ function buildEditableItems(
   const result: EditableItem[] = [];
 
   for (const collection of availableCollections) {
+    const isEligible = eligibleCollectionIds.has(collection.id);
     for (const product of collection.products) {
       for (const variant of product.variants) {
+        const qty = currentQty[String(variant.id)] ?? 0;
+        if (!isEligible && qty === 0) continue;
         if (seen.has(variant.id.toString())) continue;
         seen.add(variant.id.toString());
         result.push({
@@ -409,6 +433,7 @@ function BundleEditor({
   availableCollections,
   quantityRanges,
   preferences,
+  eligibleCollectionIds,
 }: {
   bundleSelection: BundleSelection;
   chargeIsQueued: boolean;
@@ -417,10 +442,12 @@ function BundleEditor({
   availableCollections: BundleCollection[];
   quantityRanges: number[][];
   preferences: CustomerPreference | null;
+  eligibleCollectionIds: string[];
 }) {
   const fetcher = useFetcher<typeof action>();
+  const eligibleSet = new Set(eligibleCollectionIds);
   const [items, setItems] = useState<EditableItem[]>(() =>
-    buildEditableItems(bundleSelection, availableCollections, preferences)
+    buildEditableItems(bundleSelection, availableCollections, preferences, eligibleSet)
   );
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))

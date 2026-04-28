@@ -4,7 +4,7 @@ import type { BundleItemPayload } from "./types";
 
 const STORE_PATH = join(process.cwd(), "data", "bundle-defaults.json");
 
-const DEFAULT_TARGET_QUANTITY = 5;
+export const MEALS_PER_WEEK = 5;
 
 export type WeeklyConfig = { targetQuantity: number };
 
@@ -30,7 +30,7 @@ function writeStore(store: Store): void {
 
 export function getWeeklyConfig(weekStart: string): WeeklyConfig {
   const store = readStore();
-  return store.weeklyConfig?.[weekStart] ?? { targetQuantity: DEFAULT_TARGET_QUANTITY };
+  return store.weeklyConfig?.[weekStart] ?? { targetQuantity: MEALS_PER_WEEK };
 }
 
 export function getAllWeeklyConfigs(): Record<string, WeeklyConfig> {

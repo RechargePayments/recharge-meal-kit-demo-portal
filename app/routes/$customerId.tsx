@@ -566,12 +566,7 @@ function buildEditableItems(
   return result.sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences));
 }
 
-function formatRangeLabel(ranges: number[][]): string {
-  if (ranges.length === 0) return "";
-  const [min, max] = ranges[0];
-  if (min === max) return `${min} meal${min !== 1 ? "s" : ""}`;
-  return `${min}–${max} meals`;
-}
+const MEALS_PER_WEEK = 5;
 
 function MealGrid({
   charge,
@@ -600,7 +595,6 @@ function MealGrid({
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
   );
   const [errorDismissed, setErrorDismissed] = useState(false);
-  const [knownRanges, setKnownRanges] = useState<number[][]>(quantityRanges);
   const submittedQtyRef = useRef<Record<string, number>>({});
 
   const isSaving = fetcher.state !== "idle";
@@ -615,22 +609,14 @@ function MealGrid({
     fetcher.state === "idle" && fetcherData != null && "error" in fetcherData ? fetcherData : null;
   const showError = fetcherError != null && !errorDismissed;
 
-  const effectiveRanges = knownRanges;
-  const rangeLabel = formatRangeLabel(effectiveRanges);
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
-  const isValidTotal =
-    effectiveRanges.length === 0 ||
-    effectiveRanges.some(([min, max]) => totalItems >= min && totalItems <= max);
-  const targetTotal = effectiveRanges.length > 0 ? effectiveRanges[0][1] : 0;
+  const isValidTotal = totalItems === MEALS_PER_WEEK;
+  const targetTotal = MEALS_PER_WEEK;
 
   const hasChanges = items.some((item) => {
     const orig = savedQty[item.external_variant_id] ?? 0;
     return item.quantity !== orig;
   });
-
-  useEffect(() => {
-    if (fetcherError?.ranges?.length) setKnownRanges(fetcherError.ranges);
-  }, [fetcherError]);
 
   useEffect(() => {
     if (isSaving) setErrorDismissed(false);
@@ -706,7 +692,7 @@ function MealGrid({
               <span className="text-xs text-stone-400">for {formatDate(charge.scheduled_at)}</span>
             </div>
             <span className="text-sm font-bold tabular-nums" style={{ color: isValidTotal ? "#16a34a" : "#d97706" }}>
-              {totalItems} / {rangeLabel}
+              {totalItems} / {MEALS_PER_WEEK} meals
             </span>
           </div>
           <div className="h-2.5 bg-stone-100 rounded-full overflow-hidden">
@@ -819,10 +805,11 @@ function MealGrid({
                     </span>
                     <button
                       onClick={() => adjustQty(index, 1)}
-                      className="stepper-btn"
-                      style={{ backgroundColor: "#22c55e" }}
-                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#16a34a"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#22c55e"; }}
+                      disabled={totalItems >= MEALS_PER_WEEK}
+                      className="stepper-btn disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={totalItems >= MEALS_PER_WEEK ? undefined : { backgroundColor: "#22c55e" }}
+                      onMouseEnter={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#16a34a"; }}
+                      onMouseLeave={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#22c55e"; }}
                     >
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                         <path strokeLinecap="round" d="M12 6v12M6 12h12" />
@@ -875,7 +862,7 @@ function MealGrid({
               </div>
               <button
                 onClick={handleSave}
-                disabled={isSaving || !hasChanges}
+                disabled={isSaving || !hasChanges || !isValidTotal}
                 className="btn-primary text-sm"
               >
                 {isSaving ? (

@@ -131,7 +131,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (typeof weekStart !== "string" || typeof rawQty !== "string") {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
-    const targetQuantity = Math.max(1, parseInt(rawQty, 10) || 5);
+    const targetQuantity = 5;
     saveWeeklyConfig(weekStart, { targetQuantity });
     return json({ success: true, intent: "save_config" as const, weekStart });
   }
@@ -646,37 +646,10 @@ function WeekPanel({
         </div>
 
         <div className="mt-3 flex items-center gap-3">
-          <label className="text-sm text-gray-600">Meals per bundle:</label>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setTargetQuantity((q) => Math.max(1, q - 1))}
-              disabled={targetQuantity <= 1}
-              aria-label="Decrease target"
-              className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-              </svg>
-            </button>
-            <span className="w-8 text-center text-sm font-semibold text-gray-900 tabular-nums">
-              {targetQuantity}
-            </span>
-            <button
-              onClick={() => setTargetQuantity((q) => Math.min(totalProducts, q + 1))}
-              disabled={targetQuantity >= totalProducts}
-              aria-label="Increase target"
-              className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v12M6 12h12" />
-              </svg>
-            </button>
-          </div>
-          {targetQuantity > totalProducts && (
-            <span className="text-xs text-amber-600">
-              Only {totalProducts} product{totalProducts !== 1 ? "s" : ""} available
-            </span>
-          )}
+          <span className="text-sm text-gray-600">Meals per bundle:</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums bg-gray-100 px-2.5 py-1 rounded-lg">
+            {targetQuantity}
+          </span>
         </div>
       </div>
 

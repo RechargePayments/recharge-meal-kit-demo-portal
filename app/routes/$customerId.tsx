@@ -4,6 +4,7 @@ import { Link, useFetcher, useLoaderData, useNavigation, useRevalidator, useSear
 import { useEffect, useRef, useState } from "react";
 import {
   getCustomer,
+  getCreditSummary,
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
   getBundleSelections,
@@ -21,7 +22,7 @@ import {
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import { getDeliveryDateOffset } from "~/lib/merchant-settings.server";
-import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, Customer, Property, Subscription } from "~/lib/types";
+import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -63,11 +64,12 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const selectedWeek = url.searchParams.get("week");
 
   // Phase 1: Light data — Recharge only, no Shopify calls
-  const [customer, subscriptions, queuedCharges, customerPreferences] = await Promise.all([
+  const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary] = await Promise.all([
     getCustomer(customerId),
     listSubscriptions(customerId),
     listQueuedCharges(customerId),
     Promise.resolve(getCustomerPreferences(customerId)),
+    getCreditSummary(customerId).catch(() => null),
   ]);
 
   // Phase 2: Check which charges have bundles (Recharge API only)
@@ -137,7 +139,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   const deliveryDateOffset = getDeliveryDateOffset();
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset });
+  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -218,7 +220,7 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset } =
+  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -244,6 +246,9 @@ export default function Dashboard() {
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {/* Subscription summary */}
         <SubscriptionSummary subscriptions={subscriptions} totalQueued={queuedCharges.length} deliveryDateOffset={deliveryDateOffset} />
+
+        {/* Credits balance */}
+        <CreditsBanner creditSummary={creditSummary} />
 
         {/* Preferences banner */}
         <PreferencesBanner preferences={customerPreferences} customerId={String(customer.id)} />
@@ -430,6 +435,65 @@ function StatusBadge({ status }: { status: string }) {
       <span className={`w-1.5 h-1.5 rounded-full ${c.dot} ${status === "active" ? "animate-pulse-soft" : ""}`} />
       {status}
     </span>
+  );
+}
+
+// ─── Credits banner ───────────────────────────────────────────────────────────
+
+function CreditsBanner({ creditSummary }: { creditSummary: CreditSummary | null }) {
+  if (!creditSummary) return null;
+
+  const totalBalance = parseFloat(creditSummary.total_available_balance);
+  if (totalBalance <= 0) return null;
+
+  const accounts = creditSummary.include?.credit_details?.filter(
+    (a) => parseFloat(a.available_balance) > 0
+  );
+
+  return (
+    <div className="card p-5 bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
+            <svg className="w-5 h-5 text-emerald-600" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="font-display font-semibold text-stone-900">Store Credits</h3>
+            <p className="text-sm text-emerald-700 font-bold">
+              {formatCurrency(creditSummary.total_available_balance, creditSummary.currency_code)} available
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {accounts && accounts.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {accounts.map((account) => (
+            <div
+              key={account.id}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/70 rounded-lg border border-emerald-200/60 text-sm"
+            >
+              <span className={`w-2 h-2 rounded-full ${
+                account.type === "reward" ? "bg-amber-400" :
+                account.type === "gift" ? "bg-purple-400" :
+                "bg-emerald-400"
+              }`} />
+              <span className="font-medium text-stone-700">{account.name || account.type}</span>
+              <span className="text-emerald-700 font-semibold">
+                {formatCurrency(account.available_balance, account.currency_code)}
+              </span>
+              {account.expires_at && (
+                <span className="text-xs text-stone-400">
+                  expires {formatDate(account.expires_at)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

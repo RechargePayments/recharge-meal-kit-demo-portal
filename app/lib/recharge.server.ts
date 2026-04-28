@@ -5,12 +5,14 @@ import {
   ChargeSchema,
   BundleSelectionSchema,
   BundleCollectionSchema,
+  CreditSummarySchema,
   type Customer,
   type Subscription,
   type Charge,
   type BundleSelection,
   type BundleCollection,
   type BundleItemPayload,
+  type CreditSummary,
   type Property,
 } from "./types";
 import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
@@ -51,6 +53,15 @@ export async function getCustomerByEmail(email: string): Promise<Customer | null
   const data = await api<{ customers: unknown[] }>(`/customers?email=${encodeURIComponent(email)}&limit=1`);
   const customers = z.array(CustomerSchema).parse(data.customers);
   return customers[0] ?? null;
+}
+
+// ─── Credits ─────────────────────────────────────────────────────────────────
+
+export async function getCreditSummary(customerId: string): Promise<CreditSummary> {
+  const data = await api<{ credit_summary: unknown }>(
+    `/customers/${customerId}/credit_summary?include[]=credit_details`
+  );
+  return CreditSummarySchema.parse(data.credit_summary);
 }
 
 // ─── Subscriptions ────────────────────────────────────────────────────────────

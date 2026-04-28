@@ -1,12 +1,20 @@
 import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData } from "@remix-run/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  getAllWeeklyConfigs,
   getUpcomingWeekStarts,
-  getWeeklyDefaults,
-  saveWeeklyDefault,
+  getWeeklyConfig,
+  saveWeeklyConfig,
 } from "~/lib/bundle-defaults.server";
+import {
+  getAllCustomerPreferences,
+} from "~/lib/customer-preferences.server";
+import {
+  computePersonalizedSelection,
+  type SortedProduct,
+} from "~/lib/personalize-defaults.server";
 import {
   createBundleSelection,
   getBundleCollectionsFromShopify,
@@ -19,12 +27,13 @@ import {
   filterCollectionsForWeek,
   getCollectionsWithAvailability,
 } from "~/lib/shopify.server";
-import type { BundleCollection, BundleItemPayload } from "~/lib/types";
+import type { BundleCollection } from "~/lib/types";
 
-export const meta: MetaFunction = () => [{ title: "Merchant Portal — Bundle Defaults" }];
+export const meta: MetaFunction = () => [{ title: "Merchant Portal — Personalized Defaults" }];
 
 type ApplyChargeResult = {
   chargeId: number;
+  customerId: number | null;
   status: "success" | "created" | "error";
   error?: string;
 };
@@ -34,9 +43,9 @@ type ApplyChargeResult = {
 export async function loader() {
   const weekStarts = getUpcomingWeekStarts();
 
-  const [collectionsWithAvailability, defaults] = await Promise.all([
+  const [collectionsWithAvailability, configs] = await Promise.all([
     getCollectionsWithAvailability(),
-    Promise.resolve(getWeeklyDefaults()),
+    Promise.resolve(getAllWeeklyConfigs()),
   ]);
 
   const eligiblePerWeek = weekStarts.map((w) => ({
@@ -44,14 +53,12 @@ export async function loader() {
     eligible: filterCollectionsForWeek(collectionsWithAvailability, w),
   }));
 
-  // Fetch products once for the deduplicated set of eligible collection IDs
   const uniqueIds = [
     ...new Set(eligiblePerWeek.flatMap((w) => w.eligible.map((c) => String(c.id)))),
   ];
-  const bundleCollections = await getBundleCollectionsFromShopify(uniqueIds);
+  const bundleCollections = await getBundleCollectionsFromShopify(uniqueIds, { sorted: true });
   const bundleCollectionMap = Object.fromEntries(bundleCollections.map((c) => [c.id, c]));
 
-  // Distribute per week, merging real Shopify titles
   const collectionsPerWeek = Object.fromEntries(
     eligiblePerWeek.map(({ weekStart, eligible }) => [
       weekStart,
@@ -71,7 +78,7 @@ export async function loader() {
     ])
   );
 
-  return json({ weekStarts, collectionsPerWeek, defaults });
+  return json({ weekStarts, collectionsPerWeek, configs });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -80,19 +87,15 @@ export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
 
-  if (intent === "save_defaults") {
+  if (intent === "save_config") {
     const weekStart = formData.get("weekStart");
-    const rawItems = formData.get("items");
-    if (typeof weekStart !== "string" || typeof rawItems !== "string") {
+    const rawQty = formData.get("targetQuantity");
+    if (typeof weekStart !== "string" || typeof rawQty !== "string") {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
-    try {
-      const items = JSON.parse(rawItems) as BundleItemPayload[];
-      saveWeeklyDefault(weekStart, items);
-      return json({ success: true, weekStart } as const);
-    } catch {
-      return json({ error: "Failed to save defaults" }, { status: 500 });
-    }
+    const targetQuantity = Math.max(1, parseInt(rawQty, 10) || 5);
+    saveWeeklyConfig(weekStart, { targetQuantity });
+    return json({ success: true, intent: "save_config" as const, weekStart });
   }
 
   if (intent === "apply_defaults") {
@@ -100,41 +103,68 @@ export async function action({ request }: ActionFunctionArgs) {
     if (typeof weekStart !== "string") {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
-    const allDefaults = getWeeklyDefaults();
-    const items = allDefaults[weekStart];
-    if (!items?.length) {
-      return json({ error: "No defaults saved for this week" }, { status: 400 });
-    }
+
+    const { targetQuantity } = getWeeklyConfig(weekStart);
+
     try {
-      const [bundleSubIds, charges] = await Promise.all([
+      const collectionsWithAvailability = await getCollectionsWithAvailability();
+      const eligible = filterCollectionsForWeek(collectionsWithAvailability, weekStart);
+      const collectionIds = eligible.map((c) => String(c.id));
+
+      const [bundleCollections, allPreferences, bundleSubIds, charges] = await Promise.all([
+        getBundleCollectionsFromShopify(collectionIds, { sorted: true }),
+        Promise.resolve(getAllCustomerPreferences()),
         listBundleSubscriptionIds(),
         listQueuedChargesForWeek(weekStart),
       ]);
+
+      const sortedProducts: SortedProduct[] = bundleCollections.flatMap((col) =>
+        col.products.flatMap((p) =>
+          p.variants.map((v) => ({
+            collection_id: col.id,
+            external_product_id: p.external_product_id,
+            external_variant_id: String(v.id),
+            tags: p.tags ?? [],
+          }))
+        )
+      );
+
+      if (sortedProducts.length === 0) {
+        return json({ error: "No products found in eligible collections" }, { status: 400 });
+      }
+
       const bundleCharges = charges.filter((charge) =>
         charge.line_items.some((li) => bundleSubIds.has(li.purchase_item_id))
       );
+
       const results: ApplyChargeResult[] = await Promise.all(
         bundleCharges.map(async (charge) => {
           const bundlePurchaseItemId = charge.line_items.find(
             (li) => bundleSubIds.has(li.purchase_item_id)
           )!.purchase_item_id;
+          const customerId = charge.customer?.id ? String(charge.customer.id) : null;
+          const preferences = customerId ? (allPreferences[customerId] ?? null) : null;
+          const items = computePersonalizedSelection(sortedProducts, targetQuantity, preferences);
+
           try {
             const selections = await getBundleSelections(charge.id);
             if (selections.length === 0) {
               await createBundleSelection(charge.id, bundlePurchaseItemId, items);
-              return { chargeId: charge.id, status: "created" as const };
+              return { chargeId: charge.id, customerId: charge.customer?.id ?? null, status: "created" as const };
             }
             await Promise.all(selections.map((sel) => updateBundleSelection(sel.id, items)));
-            return { chargeId: charge.id, status: "success" as const };
+            return { chargeId: charge.id, customerId: charge.customer?.id ?? null, status: "success" as const };
           } catch (err) {
             return {
               chargeId: charge.id,
+              customerId: charge.customer?.id ?? null,
               status: "error" as const,
               error: err instanceof Error ? err.message : "Unknown error",
             };
           }
         })
       );
+
       return json({
         type: "apply_result" as const,
         weekStart,
@@ -155,7 +185,7 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MerchantPage() {
-  const { weekStarts, collectionsPerWeek, defaults } = useLoaderData<typeof loader>();
+  const { weekStarts, collectionsPerWeek, configs } = useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
 
   return (
@@ -182,9 +212,10 @@ export default function MerchantPage() {
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <div>
-          <h1 className="text-lg font-semibold text-gray-900">Default Bundle Selections</h1>
+          <h1 className="text-lg font-semibold text-gray-900">Personalized Bundle Defaults</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Configure the default bundle items for each upcoming week's orders.
+            Products are shown in Shopify collection sort order (your priority ranking).
+            Each customer's bundle is personalized based on their dietary preferences.
           </p>
         </div>
 
@@ -205,14 +236,14 @@ export default function MerchantPage() {
           ))}
         </div>
 
-        {/* Active week editor */}
+        {/* Active week panel */}
         {weekStarts.map((week) =>
           week === activeWeek ? (
-            <WeekEditor
+            <WeekPanel
               key={week}
               weekStart={week}
               collections={collectionsPerWeek[week] ?? []}
-              savedSelections={defaults[week] ?? []}
+              savedConfig={configs[week] ?? null}
             />
           ) : null
         )}
@@ -236,12 +267,14 @@ function formatWeekRangeLabel(weekStart: string): string {
   return `${start.toLocaleDateString("en-US", opts)} – ${end.toLocaleDateString("en-US", opts)}`;
 }
 
-// ─── Week editor ──────────────────────────────────────────────────────────────
+// ─── Week panel ───────────────────────────────────────────────────────────────
 
 type CollectionWithDates = BundleCollection & {
   availableFrom: string | null;
   availableUntil: string | null;
 };
+
+type WeeklyConfig = { targetQuantity: number };
 
 function formatDateRange(from: string | null, until: string | null): string {
   const fmt = (d: string) =>
@@ -252,82 +285,40 @@ function formatDateRange(from: string | null, until: string | null): string {
   return "";
 }
 
-type EditableItem = {
-  collection_id: string;
-  collection_source: "shopify";
-  external_product_id: string;
-  external_variant_id: string;
-  quantity: number;
-  productTitle: string;
-  variantTitle: string;
-  imageUrl: string | null;
-};
+const DIETARY_TAGS = ["dairy", "wheat", "gluten free", "vegetarian", "vegan", "meat", "fish", "nut", "soy", "egg"];
 
-function buildItems(
-  collections: BundleCollection[],
-  savedSelections: BundleItemPayload[]
-): EditableItem[] {
-  const savedQty: Record<string, number> = {};
-  for (const s of savedSelections) {
-    savedQty[s.external_variant_id] = s.quantity;
-  }
-
-  const seen = new Set<string>();
-  const result: EditableItem[] = [];
-
-  for (const collection of collections) {
-    for (const product of collection.products) {
-      for (const variant of product.variants) {
-        const vid = String(variant.id);
-        if (seen.has(vid)) continue;
-        seen.add(vid);
-        result.push({
-          collection_id: collection.id,
-          collection_source: "shopify",
-          external_product_id: product.external_product_id,
-          external_variant_id: vid,
-          quantity: savedQty[vid] ?? 0,
-          productTitle: product.title,
-          variantTitle: variant.title,
-          imageUrl: product.image_url ?? null,
-        });
-      }
-    }
-  }
-
-  return result;
+function getDietaryTags(tags: string[]): string[] {
+  return tags.filter((t) =>
+    DIETARY_TAGS.some((dt) => t.toLowerCase() === dt.toLowerCase())
+  );
 }
 
-function WeekEditor({
+function WeekPanel({
   weekStart,
   collections,
-  savedSelections,
+  savedConfig,
 }: {
   weekStart: string;
   collections: CollectionWithDates[];
-  savedSelections: BundleItemPayload[];
+  savedConfig: WeeklyConfig | null;
 }) {
-  const fetcher = useFetcher<typeof action>();
+  const saveFetcher = useFetcher<typeof action>();
   const applyFetcher = useFetcher<typeof action>();
-  const [items, setItems] = useState<EditableItem[]>(() =>
-    buildItems(collections, savedSelections)
-  );
-  const [savedQty, setSavedQty] = useState<Record<string, number>>(
-    () => Object.fromEntries(savedSelections.map((s) => [s.external_variant_id, s.quantity]))
-  );
+  const [targetQuantity, setTargetQuantity] = useState(savedConfig?.targetQuantity ?? 5);
+  const [savedQuantity, setSavedQuantity] = useState(savedConfig?.targetQuantity ?? 5);
   const [applyConfirming, setApplyConfirming] = useState(false);
-  const submittedRef = useRef<Record<string, number>>({});
 
-  const isSaving = fetcher.state !== "idle";
+  const isSaving = saveFetcher.state !== "idle";
   const isApplying = applyFetcher.state !== "idle";
-  const fetcherData = fetcher.data as
-    | { success: true; weekStart: string }
+
+  const saveData = saveFetcher.data as
+    | { success: true; intent: "save_config"; weekStart: string }
     | { error: string }
     | undefined;
-  const savedOk = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
-  const fetcherError =
-    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
-      ? fetcherData.error
+  const savedOk = saveFetcher.state === "idle" && saveData != null && "success" in saveData;
+  const saveError =
+    saveFetcher.state === "idle" && saveData != null && "error" in saveData
+      ? (saveData as { error: string }).error
       : null;
 
   const applyData = applyFetcher.data;
@@ -345,43 +336,24 @@ function WeekEditor({
       ? (applyData as { error: string }).error
       : null;
 
-  const hasDefaults = savedSelections.length > 0;
-  const hasChanges = items.some(
-    (item) => (savedQty[item.external_variant_id] ?? 0) !== item.quantity
+  const hasConfigChanges = targetQuantity !== savedQuantity;
+
+  const totalProducts = collections.reduce(
+    (sum, c) => sum + c.products.length,
+    0
   );
-  const totalSelected = items.reduce((sum, item) => sum + item.quantity, 0);
 
   useEffect(() => {
-    if (savedOk) setSavedQty(submittedRef.current);
+    if (savedOk) setSavedQuantity(targetQuantity);
   }, [savedOk]);
 
   useEffect(() => {
     if (isApplying) setApplyConfirming(false);
   }, [isApplying]);
 
-  const adjustQty = (index: number, delta: number) => {
-    setItems((prev) =>
-      prev.map((item, i) =>
-        i === index ? { ...item, quantity: Math.max(0, item.quantity + delta) } : item
-      )
-    );
-  };
-
   const handleSave = () => {
-    submittedRef.current = Object.fromEntries(
-      items.map((i) => [i.external_variant_id, i.quantity])
-    );
-    const payload: BundleItemPayload[] = items
-      .filter((i) => i.quantity > 0)
-      .map(({ collection_id, collection_source, external_product_id, external_variant_id, quantity }) => ({
-        collection_id,
-        collection_source,
-        external_product_id,
-        external_variant_id,
-        quantity,
-      }));
-    fetcher.submit(
-      { intent: "save_defaults", weekStart, items: JSON.stringify(payload) },
+    saveFetcher.submit(
+      { intent: "save_config", weekStart, targetQuantity: String(targetQuantity) },
       { method: "post" }
     );
   };
@@ -393,118 +365,166 @@ function WeekEditor({
     );
   };
 
-  // Group items by collection for display
-  const grouped = collections
-    .map((c) => ({
-      collection: c,
-      label: c.title,
-      items: items.filter((item) => item.collection_id === c.id),
-    }))
-    .filter((g) => g.items.length > 0);
+  let positionCounter = 0;
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
       {/* Error banner */}
-      {fetcherError && (
+      {saveError && (
         <div className="mx-4 mt-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3">
-          <p className="text-sm text-red-800">{fetcherError}</p>
+          <p className="text-sm text-red-800">{saveError}</p>
         </div>
       )}
 
       {/* Header */}
-      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
-        <div>
-          <h2 className="font-semibold text-gray-900">
-            Week of {formatWeekRangeLabel(weekStart)}
-          </h2>
-          <p className="text-sm text-gray-400 mt-0.5">
-            {totalSelected} item{totalSelected !== 1 ? "s" : ""} selected
-          </p>
+      <div className="px-5 py-4 border-b border-gray-100">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="font-semibold text-gray-900">
+              Week of {formatWeekRangeLabel(weekStart)}
+            </h2>
+            <p className="text-sm text-gray-400 mt-0.5">
+              {totalProducts} product{totalProducts !== 1 ? "s" : ""} available across {collections.length} collection{collections.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+          {savedOk && (
+            <span className="text-green-600 text-xs font-medium flex items-center gap-1 flex-none">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              Saved
+            </span>
+          )}
         </div>
-        {savedOk && (
-          <span className="text-green-600 text-xs font-medium flex items-center gap-1 flex-none">
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-            Saved
-          </span>
-        )}
+
+        {/* Target quantity control */}
+        <div className="mt-3 flex items-center gap-3">
+          <label className="text-sm text-gray-600">Meals per bundle:</label>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setTargetQuantity((q) => Math.max(1, q - 1))}
+              disabled={targetQuantity <= 1}
+              aria-label="Decrease target"
+              className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+              </svg>
+            </button>
+            <span className="w-8 text-center text-sm font-semibold text-gray-900 tabular-nums">
+              {targetQuantity}
+            </span>
+            <button
+              onClick={() => setTargetQuantity((q) => Math.min(totalProducts, q + 1))}
+              disabled={targetQuantity >= totalProducts}
+              aria-label="Increase target"
+              className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v12M6 12h12" />
+              </svg>
+            </button>
+          </div>
+          {targetQuantity > totalProducts && (
+            <span className="text-xs text-amber-600">
+              Only {totalProducts} product{totalProducts !== 1 ? "s" : ""} available
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Collections */}
-      {grouped.length === 0 ? (
+      {/* Sorted product list (read-only) */}
+      {collections.length === 0 ? (
         <div className="px-5 py-8 text-center text-sm text-gray-400">
-          No products found in the configured collections.
+          No products found in the configured collections for this week.
         </div>
       ) : (
         <div className="divide-y divide-gray-50">
-          {grouped.map(({ collection, label, items: groupItems }) => (
-            <div key={collection.id}>
-              <div className="px-5 py-2 bg-gray-50">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                  {label}
-                </p>
-                {(collection.availableFrom || collection.availableUntil) && (
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    {formatDateRange(collection.availableFrom, collection.availableUntil)}
+          {collections.map((collection) => {
+            const collectionStartPos = positionCounter;
+            return (
+              <div key={collection.id}>
+                <div className="px-5 py-2 bg-gray-50">
+                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                    {collection.title}
                   </p>
-                )}
-              </div>
-              {groupItems.map((item) => {
-                const index = items.indexOf(item);
-                return (
-                  <div
-                    key={item.external_variant_id}
-                    className={`px-5 py-3.5 flex items-center gap-4 hover:bg-gray-50/60 transition-colors ${
-                      item.quantity === 0 ? "opacity-50" : ""
-                    }`}
-                  >
-                    {item.imageUrl ? (
-                      <img
-                        src={item.imageUrl}
-                        alt={item.productTitle}
-                        className="w-10 h-10 rounded-lg object-cover flex-none bg-gray-100"
-                      />
-                    ) : (
-                      <div className="w-10 h-10 rounded-lg bg-gray-100 flex-none" />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800">{item.productTitle}</p>
-                      {item.variantTitle && item.variantTitle !== "Default Title" && (
-                        <p className="text-xs text-gray-400 mt-0.5">{item.variantTitle}</p>
+                  {(collection.availableFrom || collection.availableUntil) && (
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {formatDateRange(collection.availableFrom, collection.availableUntil)}
+                    </p>
+                  )}
+                </div>
+                {collection.products.map((product) => {
+                  positionCounter++;
+                  const position = positionCounter;
+                  const dietaryTags = getDietaryTags(product.tags ?? []);
+                  const isWithinTarget = position <= targetQuantity;
+                  return (
+                    <div
+                      key={product.id}
+                      className={`px-5 py-3.5 flex items-center gap-4 transition-colors ${
+                        isWithinTarget ? "bg-indigo-50/40" : "opacity-50"
+                      }`}
+                    >
+                      {/* Position badge */}
+                      <span
+                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
+                          isWithinTarget
+                            ? "bg-indigo-100 text-indigo-700"
+                            : "bg-gray-100 text-gray-400"
+                        }`}
+                      >
+                        {position}
+                      </span>
+
+                      {/* Thumbnail */}
+                      {product.image_url ? (
+                        <img
+                          src={product.image_url}
+                          alt={product.title}
+                          className="w-10 h-10 rounded-lg object-cover flex-none bg-gray-100"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-gray-100 flex-none" />
+                      )}
+
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800">{product.title}</p>
+                        {dietaryTags.length > 0 && (
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            {dietaryTags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="text-xs font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Within-target indicator */}
+                      {isWithinTarget && (
+                        <span className="text-xs text-indigo-500 font-medium flex-none">Default</span>
                       )}
                     </div>
-                    <div className="flex-none flex items-center gap-2">
-                      <button
-                        onClick={() => adjustQty(index, -1)}
-                        disabled={item.quantity <= 0}
-                        aria-label="Decrease quantity"
-                        className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                      >
-                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-                        </svg>
-                      </button>
-                      <span className="w-6 text-center text-sm font-semibold text-gray-900 tabular-nums">
-                        {item.quantity}
-                      </span>
-                      <button
-                        onClick={() => adjustQty(index, 1)}
-                        aria-label="Increase quantity"
-                        className="w-7 h-7 rounded-full border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center justify-center text-gray-500 transition-colors"
-                      >
-                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v12M6 12h12" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+                  );
+                })}
+              </div>
+            );
+          })}
         </div>
       )}
+
+      {/* Help text */}
+      <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
+        <p className="text-xs text-gray-400">
+          Priority order is controlled by collection sort order in Shopify admin.
+          Items matching a customer's excluded ingredients will be skipped; preferred items are boosted to the top.
+        </p>
+      </div>
 
       {/* Apply results panel */}
       {(applyResult || applyError) && (
@@ -526,9 +546,9 @@ function WeekEditor({
                 ) : (
                   <>
                     <p className="text-sm font-medium text-gray-800">
-                      Applied to {appliedCount} of {applyResult.results.length} eligible charge{applyResult.results.length !== 1 ? "s" : ""}
+                      Personalized and applied to {appliedCount} of {applyResult.results.length} eligible charge{applyResult.results.length !== 1 ? "s" : ""}
                       {createdCount > 0 && (
-                        <span className="text-gray-400 font-normal"> · {createdCount} created</span>
+                        <span className="text-gray-400 font-normal"> · {createdCount} new</span>
                       )}
                     </p>
                     <ul className="space-y-1.5 mt-1">
@@ -546,6 +566,7 @@ function WeekEditor({
                           )}
                           <span className={r.status === "error" ? "text-red-700" : "text-gray-600"}>
                             Charge #{r.chargeId}
+                            {r.customerId && <span className="text-gray-400"> (customer {r.customerId})</span>}
                             {r.status === "created" && " — created"}
                             {r.status === "error" && r.error && ` — ${r.error}`}
                           </span>
@@ -570,11 +591,11 @@ function WeekEditor({
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
               </svg>
-              Applying…
+              Personalizing & applying…
             </span>
           ) : applyConfirming ? (
             <>
-              <span className="text-sm text-gray-600">Apply saved defaults to all queued charges this week?</span>
+              <span className="text-sm text-gray-600">Apply personalized defaults to all queued charges this week?</span>
               <button
                 onClick={() => setApplyConfirming(false)}
                 className="text-xs text-gray-500 hover:text-gray-800 px-2.5 py-1.5 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
@@ -591,8 +612,8 @@ function WeekEditor({
           ) : (
             <button
               onClick={() => setApplyConfirming(true)}
-              disabled={!hasDefaults}
-              title={!hasDefaults ? "Save defaults first to enable" : undefined}
+              disabled={totalProducts === 0 || hasConfigChanges}
+              title={hasConfigChanges ? "Save config first" : totalProducts === 0 ? "No products available" : undefined}
               className="text-sm font-medium text-indigo-600 hover:text-indigo-800 border border-indigo-200 hover:border-indigo-400 px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Apply to all charges
@@ -600,13 +621,13 @@ function WeekEditor({
           )}
         </div>
 
-        {/* Right: Save defaults */}
+        {/* Right: Save config */}
         <button
           onClick={handleSave}
-          disabled={isSaving || !hasChanges || isApplying}
+          disabled={isSaving || !hasConfigChanges || isApplying}
           className="text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {isSaving ? "Saving…" : "Save defaults"}
+          {isSaving ? "Saving…" : "Save config"}
         </button>
       </div>
     </div>

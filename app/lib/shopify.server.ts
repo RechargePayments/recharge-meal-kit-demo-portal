@@ -71,6 +71,27 @@ export async function getCollectionProducts(collectionId: string): Promise<Shopi
   return z.array(ShopifyProductSchema).parse(data.products);
 }
 
+export async function getCollectionCollects(
+  collectionId: string
+): Promise<Map<number, number>> {
+  const data = await shopifyFetch<{
+    collects: Array<{ product_id: number; position: number }>;
+  }>(`/collects.json?collection_id=${collectionId}&fields=product_id,position&limit=250`);
+  return new Map(data.collects.map((c) => [c.product_id, c.position]));
+}
+
+export async function getCollectionProductsSorted(
+  collectionId: string
+): Promise<ShopifyProduct[]> {
+  const [products, positionMap] = await Promise.all([
+    getCollectionProducts(collectionId),
+    getCollectionCollects(collectionId),
+  ]);
+  return products.sort(
+    (a, b) => (positionMap.get(a.id) ?? Infinity) - (positionMap.get(b.id) ?? Infinity)
+  );
+}
+
 const ShopifyCollectionSchema = z.object({
   id: z.number(),
   title: z.string(),

@@ -21,3 +21,7 @@ export function getCustomerPreferences(customerId: string | null): CustomerPrefe
   const store = readStore();
   return store.preferences[customerId] ?? null;
 }
+
+export function getAllCustomerPreferences(): Record<string, CustomerPreference> {
+  return readStore().preferences;
+}

@@ -12,7 +12,7 @@ import {
   type BundleCollection,
   type BundleItemPayload,
 } from "./types";
-import { getCollectionProducts } from "./shopify.server";
+import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
 
 const BASE_URL = process.env.RECHARGE_API_URL ?? "https://api.rechargeapps.com";
 const ADMIN_URL = process.env.RECHARGE_ADMIN_URL ?? BASE_URL;
@@ -98,13 +98,18 @@ export async function getBundleSelections(chargeId: number): Promise<BundleSelec
   return z.array(BundleSelectionSchema).parse(data.bundle_selections);
 }
 
-export async function getBundleCollectionsFromShopify(collectionIds: string[]): Promise<BundleCollection[]> {
+export async function getBundleCollectionsFromShopify(
+  collectionIds: string[],
+  { sorted = false }: { sorted?: boolean } = {}
+): Promise<BundleCollection[]> {
   const unique = [...new Set(collectionIds)];
   if (unique.length === 0) return [];
 
+  const fetchProducts = sorted ? getCollectionProductsSorted : getCollectionProducts;
+
   const collections = await Promise.all(
     unique.map(async (collectionId) => {
-      const products = await getCollectionProducts(collectionId);
+      const products = await fetchProducts(collectionId);
       return {
         id: collectionId,
         title: collectionId,

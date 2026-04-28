@@ -11,6 +11,7 @@ import {
   type BundleSelection,
   type BundleCollection,
   type BundleItemPayload,
+  type Property,
 } from "./types";
 import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
 
@@ -87,6 +88,19 @@ export async function skipCharge(chargeId: string, purchaseItemIds?: number[]): 
     body: JSON.stringify(body),
   });
   return ChargeSchema.parse(data.charge);
+}
+
+// ─── Subscription updates ─────────────────────────────────────────────────────
+
+export async function updateSubscriptionProperties(
+  subscriptionId: number,
+  properties: Property[]
+): Promise<Subscription> {
+  const data = await api<{ subscription: unknown }>(
+    `/subscriptions/${subscriptionId}`,
+    { method: "PUT", body: JSON.stringify({ properties }) }
+  );
+  return SubscriptionSchema.parse(data.subscription);
 }
 
 // ─── Bundle Selections ────────────────────────────────────────────────────────

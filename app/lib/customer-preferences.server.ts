@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const STORE_PATH = join(process.cwd(), "data", "customer-preferences.json");
 
@@ -16,6 +16,12 @@ function readStore(): Store {
   }
 }
 
+function writeStore(store: Store): void {
+  const dir = dirname(STORE_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
+}
+
 export function getCustomerPreferences(customerId: string | null): CustomerPreference | null {
   if (!customerId) return null;
   const store = readStore();
@@ -24,4 +30,10 @@ export function getCustomerPreferences(customerId: string | null): CustomerPrefe
 
 export function getAllCustomerPreferences(): Record<string, CustomerPreference> {
   return readStore().preferences;
+}
+
+export function saveCustomerPreferences(customerId: string, preferences: CustomerPreference): void {
+  const store = readStore();
+  store.preferences[customerId] = preferences;
+  writeStore(store);
 }

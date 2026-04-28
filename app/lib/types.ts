@@ -17,6 +17,13 @@ export type Customer = z.infer<typeof CustomerSchema>;
 
 // ─── Subscription ─────────────────────────────────────────────────────────────
 
+export const PropertySchema = z.object({
+  name: z.string(),
+  value: z.string(),
+});
+
+export type Property = z.infer<typeof PropertySchema>;
+
 export const SubscriptionSchema = z.object({
   id: z.number(),
   address_id: z.number(),
@@ -33,6 +40,7 @@ export const SubscriptionSchema = z.object({
   is_skippable: z.boolean().nullable().optional(),
   is_swappable: z.boolean().nullable().optional(),
   sku: z.string().nullable().optional(),
+  properties: z.array(PropertySchema).optional(),
 });
 
 export type Subscription = z.infer<typeof SubscriptionSchema>;

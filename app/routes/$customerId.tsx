@@ -18,6 +18,10 @@ export const meta: MetaFunction = () => [{ title: "Future Charge Portal — Demo
 export async function loader({ params }: LoaderFunctionArgs) {
   const { customerId } = params;
   if (!customerId) throw new Error("Missing customer ID");
+  // Recharge customer ids are numeric; blocks static paths (e.g. robots.txt) if they hit this route
+  if (!/^\d+$/.test(customerId)) {
+    throw new Response("Not Found", { status: 404 });
+  }
 
   const [customer, subscriptions, queuedCharges] = await Promise.all([
     getCustomer(customerId),

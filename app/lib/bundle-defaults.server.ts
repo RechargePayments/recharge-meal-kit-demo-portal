@@ -4,14 +4,21 @@ import type { BundleItemPayload } from "./types";
 
 const STORE_PATH = join(process.cwd(), "data", "bundle-defaults.json");
 
-type Store = { weeklyDefaults: Record<string, BundleItemPayload[]> };
+const DEFAULT_TARGET_QUANTITY = 5;
+
+export type WeeklyConfig = { targetQuantity: number };
+
+type Store = {
+  weeklyConfig?: Record<string, WeeklyConfig>;
+  weeklyDefaults?: Record<string, BundleItemPayload[]>;
+};
 
 function readStore(): Store {
-  if (!existsSync(STORE_PATH)) return { weeklyDefaults: {} };
+  if (!existsSync(STORE_PATH)) return {};
   try {
     return JSON.parse(readFileSync(STORE_PATH, "utf-8")) as Store;
   } catch {
-    return { weeklyDefaults: {} };
+    return {};
   }
 }
 
@@ -21,12 +28,31 @@ function writeStore(store: Store): void {
   writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
 }
 
-export function getWeeklyDefaults(): Record<string, BundleItemPayload[]> {
-  return readStore().weeklyDefaults;
+export function getWeeklyConfig(weekStart: string): WeeklyConfig {
+  const store = readStore();
+  return store.weeklyConfig?.[weekStart] ?? { targetQuantity: DEFAULT_TARGET_QUANTITY };
 }
 
+export function getAllWeeklyConfigs(): Record<string, WeeklyConfig> {
+  return readStore().weeklyConfig ?? {};
+}
+
+export function saveWeeklyConfig(weekStart: string, config: WeeklyConfig): void {
+  const store = readStore();
+  if (!store.weeklyConfig) store.weeklyConfig = {};
+  store.weeklyConfig[weekStart] = config;
+  writeStore(store);
+}
+
+/** @deprecated Kept for backward compatibility with old store format */
+export function getWeeklyDefaults(): Record<string, BundleItemPayload[]> {
+  return readStore().weeklyDefaults ?? {};
+}
+
+/** @deprecated Kept for backward compatibility with old store format */
 export function saveWeeklyDefault(weekStart: string, selections: BundleItemPayload[]): void {
   const store = readStore();
+  if (!store.weeklyDefaults) store.weeklyDefaults = {};
   store.weeklyDefaults[weekStart] = selections;
   writeStore(store);
 }

@@ -4,6 +4,7 @@ import { Link, useFetcher, useLoaderData, useNavigation, useRevalidator, useSear
 import { useEffect, useRef, useState } from "react";
 import {
   getCustomer,
+  getCreditSummary,
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
   getBundleSelections,
@@ -20,7 +21,8 @@ import {
 } from "~/lib/shopify.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
-import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, Customer, Property, Subscription } from "~/lib/types";
+import { getDeliveryDateOffset } from "~/lib/merchant-settings.server";
+import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -62,11 +64,12 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const selectedWeek = url.searchParams.get("week");
 
   // Phase 1: Light data — Recharge only, no Shopify calls
-  const [customer, subscriptions, queuedCharges, customerPreferences] = await Promise.all([
+  const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary] = await Promise.all([
     getCustomer(customerId),
     listSubscriptions(customerId),
     listQueuedCharges(customerId),
     Promise.resolve(getCustomerPreferences(customerId)),
+    getCreditSummary(customerId).catch(() => null),
   ]);
 
   // Phase 2: Check which charges have bundles (Recharge API only)
@@ -134,7 +137,9 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     };
   }
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences });
+  const deliveryDateOffset = getDeliveryDateOffset();
+
+  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -215,7 +220,7 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences } =
+  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -240,7 +245,10 @@ export default function Dashboard() {
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {/* Subscription summary */}
-        <SubscriptionSummary subscriptions={subscriptions} totalQueued={queuedCharges.length} />
+        <SubscriptionSummary subscriptions={subscriptions} totalQueued={queuedCharges.length} deliveryDateOffset={deliveryDateOffset} />
+
+        {/* Credits balance */}
+        <CreditsBanner creditSummary={creditSummary} />
 
         {/* Preferences banner */}
         <PreferencesBanner preferences={customerPreferences} customerId={String(customer.id)} />
@@ -251,6 +259,7 @@ export default function Dashboard() {
             <WeekTabs
               tabs={tabsWithBundles}
               activeIndex={activeIndex}
+              deliveryDateOffset={deliveryDateOffset}
               onSelect={(i) => {
                 const params = new URLSearchParams(searchParams);
                 params.set("week", String(tabsWithBundles[i].chargeId));
@@ -272,13 +281,14 @@ export default function Dashboard() {
                     quantityRanges={bs.external_product_id ? (activeBundle.bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
                     preferences={customerPreferences}
                     eligibleCollectionIds={activeBundle.eligibleCollectionIds}
+                    deliveryDateOffset={deliveryDateOffset}
                   />
                 ))}
               </div>
             ) : null}
           </section>
         ) : queuedCharges.length > 0 ? (
-          <ChargesListSimple charges={queuedCharges} subscriptions={subscriptions} />
+          <ChargesListSimple charges={queuedCharges} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} />
         ) : (
           <EmptyState />
         )}
@@ -375,35 +385,40 @@ function Header({ customer, refreshing }: { customer: Customer; refreshing: bool
 
 // ─── Subscription summary ─────────────────────────────────────────────────────
 
-function SubscriptionSummary({ subscriptions, totalQueued }: { subscriptions: Subscription[]; totalQueued: number }) {
+function SubscriptionSummary({ subscriptions, totalQueued, deliveryDateOffset }: { subscriptions: Subscription[]; totalQueued: number; deliveryDateOffset: number }) {
   if (subscriptions.length === 0) return null;
 
   return (
     <div className="flex flex-wrap gap-4">
-      {subscriptions.map((sub) => (
-        <div key={sub.id} className="card card-hover flex-1 min-w-[260px] p-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h3 className="font-display font-semibold text-stone-900 truncate">{sub.product_title}</h3>
-              <div className="flex items-center gap-2 mt-1.5">
-                <StatusBadge status={sub.status} />
-                {sub.charge_interval_frequency && sub.order_interval_unit && (
-                  <span className="text-xs text-stone-400">
-                    Every {sub.charge_interval_frequency} {sub.order_interval_unit}
-                    {sub.charge_interval_frequency > 1 ? "s" : ""}
-                  </span>
-                )}
+      {subscriptions.map((sub) => {
+        const chargeDate = sub.next_charge_scheduled_at;
+        const deliveryDate = chargeDate ? addDaysToDate(chargeDate, deliveryDateOffset) : null;
+        return (
+          <div key={sub.id} className="card card-hover flex-1 min-w-[260px] p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="font-display font-semibold text-stone-900 truncate">{sub.product_title}</h3>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <StatusBadge status={sub.status} />
+                  {sub.charge_interval_frequency && sub.order_interval_unit && (
+                    <span className="text-xs text-stone-400">
+                      Every {sub.charge_interval_frequency} {sub.order_interval_unit}
+                      {sub.charge_interval_frequency > 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
               </div>
+              {deliveryDate && chargeDate && (
+                <div className="flex-none text-right">
+                  <p className="text-xs text-stone-400">Next delivery</p>
+                  <p className="text-sm font-semibold text-stone-700">{formatDate(deliveryDate)}</p>
+                  <p className="text-xs text-stone-400 mt-0.5">Charged on {formatDate(chargeDate)}</p>
+                </div>
+              )}
             </div>
-            {sub.next_charge_scheduled_at && (
-              <div className="flex-none text-right">
-                <p className="text-xs text-stone-400">Next delivery</p>
-                <p className="text-sm font-semibold text-stone-700">{formatDate(sub.next_charge_scheduled_at)}</p>
-              </div>
-            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -420,6 +435,65 @@ function StatusBadge({ status }: { status: string }) {
       <span className={`w-1.5 h-1.5 rounded-full ${c.dot} ${status === "active" ? "animate-pulse-soft" : ""}`} />
       {status}
     </span>
+  );
+}
+
+// ─── Credits banner ───────────────────────────────────────────────────────────
+
+function CreditsBanner({ creditSummary }: { creditSummary: CreditSummary | null }) {
+  if (!creditSummary) return null;
+
+  const totalBalance = parseFloat(creditSummary.total_available_balance);
+  if (totalBalance <= 0) return null;
+
+  const accounts = creditSummary.include?.credit_details?.filter(
+    (a) => parseFloat(a.available_balance) > 0
+  );
+
+  return (
+    <div className="card p-5 bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
+            <svg className="w-5 h-5 text-emerald-600" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="font-display font-semibold text-stone-900">Store Credits</h3>
+            <p className="text-sm text-emerald-700 font-bold">
+              {formatCurrency(creditSummary.total_available_balance, creditSummary.currency_code)} available
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {accounts && accounts.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {accounts.map((account) => (
+            <div
+              key={account.id}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/70 rounded-lg border border-emerald-200/60 text-sm"
+            >
+              <span className={`w-2 h-2 rounded-full ${
+                account.type === "reward" ? "bg-amber-400" :
+                account.type === "gift" ? "bg-purple-400" :
+                "bg-emerald-400"
+              }`} />
+              <span className="font-medium text-stone-700">{account.name || account.type}</span>
+              <span className="text-emerald-700 font-semibold">
+                {formatCurrency(account.available_balance, account.currency_code)}
+              </span>
+              {account.expires_at && (
+                <span className="text-xs text-stone-400">
+                  expires {formatDate(account.expires_at)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -647,6 +721,12 @@ function PreferencesBanner({
 
 // ─── Week tabs ────────────────────────────────────────────────────────────────
 
+function addDaysToDate(dateStr: string, days: number): string {
+  const d = new Date(dateStr.slice(0, 10) + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function formatWeekLabel(dateStr: string): string {
   const d = new Date(dateStr);
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
@@ -655,10 +735,12 @@ function formatWeekLabel(dateStr: string): string {
 function WeekTabs({
   tabs,
   activeIndex,
+  deliveryDateOffset,
   onSelect,
 }: {
   tabs: ChargeTabInfo[];
   activeIndex: number;
+  deliveryDateOffset: number;
   onSelect: (index: number) => void;
 }) {
   return (
@@ -667,6 +749,7 @@ function WeekTabs({
       <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
         {tabs.map((tab, i) => {
           const isActive = i === activeIndex;
+          const deliveryDate = addDaysToDate(tab.scheduledAt, deliveryDateOffset);
           return (
             <button
               key={tab.chargeId}
@@ -678,9 +761,9 @@ function WeekTabs({
               }`}
               style={isActive ? { backgroundColor: "#16a34a", borderColor: "#16a34a", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" } : undefined}
             >
-              <p className="font-semibold">Week of {formatWeekLabel(tab.scheduledAt)}</p>
+              <p className="font-semibold">Delivery {formatWeekLabel(deliveryDate)}</p>
               <p className={`text-xs mt-0.5 ${isActive ? "text-green-200" : "text-stone-400"}`}>
-                {formatCurrency(tab.totalPrice)}
+                {formatCurrency(tab.totalPrice)} · Charged {formatWeekLabel(tab.scheduledAt)}
               </p>
             </button>
           );
@@ -782,6 +865,7 @@ function MealGrid({
   quantityRanges,
   preferences,
   eligibleCollectionIds,
+  deliveryDateOffset,
 }: {
   charge: Charge;
   bundleSelection: BundleSelection;
@@ -790,6 +874,7 @@ function MealGrid({
   quantityRanges: number[][];
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
+  deliveryDateOffset: number;
 }) {
   const fetcher = useFetcher<typeof action>();
   const skipFetcher = useFetcher();
@@ -895,7 +980,12 @@ function MealGrid({
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <h3 className="font-display font-semibold text-stone-900">{subscriptionTitle}</h3>
-              <span className="text-xs text-stone-400">for {formatDate(charge.scheduled_at)}</span>
+              <span className="text-xs text-stone-400">
+                delivering {formatDate(addDaysToDate(charge.scheduled_at, deliveryDateOffset))}
+              </span>
+              <span className="text-xs text-stone-300">
+                (charged {formatDate(charge.scheduled_at)})
+              </span>
             </div>
             <span className="text-sm font-bold tabular-nums" style={{ color: isValidTotal ? "#16a34a" : "#d97706" }}>
               {totalItems} / {MEALS_PER_WEEK} meals
@@ -1093,22 +1183,22 @@ function MealGrid({
 
 // ─── Simple charge list (for charges without bundles) ─────────────────────────
 
-function ChargesListSimple({ charges, subscriptions }: { charges: Charge[]; subscriptions: Subscription[] }) {
+function ChargesListSimple({ charges, subscriptions, deliveryDateOffset }: { charges: Charge[]; subscriptions: Subscription[]; deliveryDateOffset: number }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-stone-100">
-        <h2 className="font-display font-semibold text-stone-900">Upcoming Charges</h2>
+        <h2 className="font-display font-semibold text-stone-900">Upcoming Deliveries</h2>
       </div>
       <div className="divide-y divide-stone-100">
         {charges.map((charge) => (
-          <SimpleChargeRow key={charge.id} charge={charge} subscriptions={subscriptions} />
+          <SimpleChargeRow key={charge.id} charge={charge} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} />
         ))}
       </div>
     </div>
   );
 }
 
-function SimpleChargeRow({ charge, subscriptions }: { charge: Charge; subscriptions: Subscription[] }) {
+function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset }: { charge: Charge; subscriptions: Subscription[]; deliveryDateOffset: number }) {
   const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
   const wasSkipped =
@@ -1123,7 +1213,8 @@ function SimpleChargeRow({ charge, subscriptions }: { charge: Charge; subscripti
   return (
     <div className="px-5 py-4 flex items-center gap-4 hover:bg-cream-dark/50 transition-colors">
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-stone-800">{formatDate(charge.scheduled_at)}</p>
+        <p className="text-sm font-semibold text-stone-800">{formatDate(addDaysToDate(charge.scheduled_at, deliveryDateOffset))}</p>
+        <p className="text-xs text-stone-400">Charged on {formatDate(charge.scheduled_at)}</p>
         <div className="flex flex-wrap gap-1 mt-1">
           {charge.line_items.slice(0, 3).map((li, i) => (
             <span key={i} className="text-xs text-stone-500">

@@ -173,6 +173,34 @@ export const BundleCollectionSchema = z.object({
 
 export type BundleCollection = z.infer<typeof BundleCollectionSchema>;
 
+// ─── Credit Summary ──────────────────────────────────────────────────────────
+
+export const CreditAccountSchema = z.object({
+  id: z.number(),
+  customer_id: z.number(),
+  available_balance: z.string(),
+  initial_balance: z.string(),
+  currency_code: z.string(),
+  name: z.string(),
+  type: z.enum(["reward", "manual", "gift"]),
+  expires_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+
+export type CreditAccount = z.infer<typeof CreditAccountSchema>;
+
+export const CreditSummarySchema = z.object({
+  customer_id: z.number(),
+  total_available_balance: z.string(),
+  currency_code: z.string(),
+  include: z
+    .object({ credit_details: z.array(CreditAccountSchema) })
+    .optional(),
+});
+
+export type CreditSummary = z.infer<typeof CreditSummarySchema>;
+
 // ─── API update payload ───────────────────────────────────────────────────────
 
 export type BundleItemPayload = Pick<

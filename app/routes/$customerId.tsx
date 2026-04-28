@@ -12,14 +12,15 @@ import {
   listSubscriptions,
   skipCharge,
   updateBundleSelection,
+  updateSubscriptionProperties,
 } from "~/lib/recharge.server";
 import {
   filterCollectionsForWeek,
   getCollectionsWithAvailability,
 } from "~/lib/shopify.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
-import { getCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
-import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, Customer, Subscription } from "~/lib/types";
+import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
+import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -172,6 +173,28 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  if (intent === "update_preferences") {
+    const customerId = formData.get("customerId");
+    const rawInclude = formData.getAll("include");
+    const rawExclude = formData.getAll("exclude");
+    if (typeof customerId !== "string") {
+      return json({ error: "Missing customerId" }, { status: 400 });
+    }
+    const include = rawInclude.filter((v): v is string => typeof v === "string");
+    const exclude = rawExclude.filter((v): v is string => typeof v === "string");
+
+    saveCustomerPreferences(customerId, { include, exclude });
+
+    const properties: Property[] = [
+      { name: "meal_type_preference", value: JSON.stringify(include) },
+      { name: "ingredient_exclusion", value: JSON.stringify(exclude) },
+    ];
+    const subs = await listSubscriptions(customerId);
+    await Promise.all(subs.map((sub) => updateSubscriptionProperties(sub.id, properties)));
+
+    return json({ success: true, intent: "update_preferences" } as const);
+  }
+
   if (intent === "skip") {
     const chargeId = formData.get("chargeId");
     const rawPurchaseItemId = formData.get("purchaseItemId");
@@ -220,7 +243,7 @@ export default function Dashboard() {
         <SubscriptionSummary subscriptions={subscriptions} totalQueued={queuedCharges.length} />
 
         {/* Preferences banner */}
-        {customerPreferences && <PreferencesBanner preferences={customerPreferences} />}
+        <PreferencesBanner preferences={customerPreferences} customerId={String(customer.id)} />
 
         {/* Week tabs + Meal grid */}
         {tabsWithBundles.length > 0 ? (
@@ -402,23 +425,206 @@ function StatusBadge({ status }: { status: string }) {
 
 // ─── Preferences banner ───────────────────────────────────────────────────────
 
-function PreferencesBanner({ preferences }: { preferences: CustomerPreference }) {
-  const hasIncludes = preferences.include.length > 0;
-  const hasExcludes = preferences.exclude.length > 0;
-  if (!hasIncludes && !hasExcludes) return null;
+const MEAL_TYPE_OPTIONS = ["Gluten Free", "Vegetarian"];
+const EXCLUSION_OPTIONS = ["Dairy", "Wheat", "Meat", "Fish"];
+
+function PreferencesBanner({
+  preferences,
+  customerId,
+}: {
+  preferences: CustomerPreference | null;
+  customerId: string;
+}) {
+  const fetcher = useFetcher();
+  const [editing, setEditing] = useState(false);
+  const [selectedIncludes, setSelectedIncludes] = useState<string[]>(preferences?.include ?? []);
+  const [selectedExcludes, setSelectedExcludes] = useState<string[]>(preferences?.exclude ?? []);
+
+  const isSaving = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && !("error" in (fetcher.data as Record<string, unknown>))) {
+      setEditing(false);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  useEffect(() => {
+    setSelectedIncludes(preferences?.include ?? []);
+    setSelectedExcludes(preferences?.exclude ?? []);
+  }, [preferences]);
+
+  const toggleInclude = (tag: string) =>
+    setSelectedIncludes((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+  const toggleExclude = (tag: string) =>
+    setSelectedExcludes((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+
+  const hasPrefs = preferences && (preferences.include.length > 0 || preferences.exclude.length > 0);
+
+  if (!editing && !hasPrefs) {
+    return (
+      <div className="card p-5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
+              <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+              </svg>
+            </div>
+            <h3 className="font-display font-semibold text-stone-900">Your Taste Profile</h3>
+          </div>
+          <button
+            onClick={() => setEditing(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 rounded-lg transition-colors border border-brand-200"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
+            </svg>
+            Set Preferences
+          </button>
+        </div>
+        <p className="text-sm text-stone-500 mt-2">Tell us what you like and what to avoid so we can personalize your meals.</p>
+      </div>
+    );
+  }
+
+  if (editing) {
+    return (
+      <div className="card p-5 ring-2 ring-brand-200">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
+              <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+              </svg>
+            </div>
+            <h3 className="font-display font-semibold text-stone-900">Edit Taste Profile</h3>
+          </div>
+        </div>
+
+        <div className="space-y-5">
+          <div>
+            <h4 className="text-sm font-semibold text-stone-700 mb-2.5">Meal Types I Prefer</h4>
+            <div className="flex flex-wrap gap-2">
+              {MEAL_TYPE_OPTIONS.map((tag) => {
+                const active = selectedIncludes.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleInclude(tag)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
+                      active
+                        ? "bg-brand-50 text-brand-700 border-brand-300 ring-1 ring-brand-200"
+                        : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
+                    }`}
+                  >
+                    {active && (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-semibold text-stone-700 mb-2.5">Ingredients to Avoid</h4>
+            <div className="flex flex-wrap gap-2">
+              {EXCLUSION_OPTIONS.map((tag) => {
+                const active = selectedExcludes.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleExclude(tag)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
+                      active
+                        ? "bg-amber-50 text-amber-700 border-amber-300 ring-1 ring-amber-200"
+                        : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
+                    }`}
+                  >
+                    {active && (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 mt-5 pt-4 border-t border-stone-100">
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={() => {
+              const formData = new FormData();
+              formData.set("intent", "update_preferences");
+              formData.set("customerId", customerId);
+              for (const tag of selectedIncludes) formData.append("include", tag);
+              for (const tag of selectedExcludes) formData.append("exclude", tag);
+              fetcher.submit(formData, { method: "post" });
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            {isSaving ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Saving...
+              </>
+            ) : (
+              "Save Preferences"
+            )}
+          </button>
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={() => {
+              setSelectedIncludes(preferences?.include ?? []);
+              setSelectedExcludes(preferences?.exclude ?? []);
+              setEditing(false);
+            }}
+            className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="card p-5">
-      <div className="flex items-center gap-2 mb-3">
-        <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
-          <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
-            <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-          </svg>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
+            <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+            </svg>
+          </div>
+          <h3 className="font-display font-semibold text-stone-900">Your Taste Profile</h3>
         </div>
-        <h3 className="font-display font-semibold text-stone-900">Your Taste Profile</h3>
+        <button
+          onClick={() => setEditing(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-stone-500 hover:text-brand-700 hover:bg-brand-50 rounded-lg transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+          </svg>
+          Edit
+        </button>
       </div>
       <div className="flex flex-wrap gap-2">
-        {preferences.include.map((tag) => (
+        {preferences!.include.map((tag) => (
           <span key={tag} className="badge bg-brand-50 text-brand-700 border border-brand-200">
             <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -426,7 +632,7 @@ function PreferencesBanner({ preferences }: { preferences: CustomerPreference })
             {tag}
           </span>
         ))}
-        {preferences.exclude.map((tag) => (
+        {preferences!.exclude.map((tag) => (
           <span key={tag} className="badge bg-amber-50 text-amber-700 border border-amber-200">
             <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />

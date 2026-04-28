@@ -16,6 +16,7 @@ import {
   filterCollectionsForWeek,
   getCollectionsWithAvailability,
 } from "~/lib/shopify.server";
+import { getWeekAssignments } from "~/lib/week-assignments.server";
 import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge } from "~/lib/types";
 import { formatCurrency, formatDate, shortId } from "~/lib/utils";
 
@@ -62,8 +63,10 @@ export async function loader({ params }: LoaderFunctionArgs) {
     ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
   ];
   const weekStart = getMondayOf(charge.scheduled_at);
+  const savedAssignments = getWeekAssignments(weekStart);
   const eligibleCollectionIds = new Set(
-    filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id))
+    savedAssignments
+      ?? filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id))
   );
   const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
   const collectionsByProductId = Object.fromEntries(

@@ -27,9 +27,14 @@ import {
   filterCollectionsForWeek,
   getCollectionsWithAvailability,
 } from "~/lib/shopify.server";
+import {
+  getAllWeekAssignments,
+  saveWeekAssignments,
+  getWeekAssignments,
+} from "~/lib/week-assignments.server";
 import type { BundleCollection } from "~/lib/types";
 
-export const meta: MetaFunction = () => [{ title: "Merchant Portal — Personalized Defaults" }];
+export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
 
 type ApplyChargeResult = {
   chargeId: number;
@@ -38,39 +43,55 @@ type ApplyChargeResult = {
   error?: string;
 };
 
+type ViewMode = "assign" | "sort-order";
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader() {
   const weekStarts = getUpcomingWeekStarts();
 
-  const [collectionsWithAvailability, configs] = await Promise.all([
+  const [collectionsWithAvailability, configs, allAssignments] = await Promise.all([
     getCollectionsWithAvailability(),
     Promise.resolve(getAllWeeklyConfigs()),
+    Promise.resolve(getAllWeekAssignments()),
   ]);
 
-  const eligiblePerWeek = weekStarts.map((w) => ({
-    weekStart: w,
-    eligible: filterCollectionsForWeek(collectionsWithAvailability, w),
+  const allCollections = collectionsWithAvailability.map((c) => ({
+    id: String(c.id),
+    title: c.title,
+    handle: c.handle,
+    availableFrom: c.availableFrom?.toISOString().slice(0, 10) ?? null,
+    availableUntil: c.availableUntil?.toISOString().slice(0, 10) ?? null,
   }));
 
-  const uniqueIds = [
-    ...new Set(eligiblePerWeek.flatMap((w) => w.eligible.map((c) => String(c.id)))),
-  ];
+  const assignedPerWeek: Record<string, string[]> = {};
+  for (const w of weekStarts) {
+    const saved = allAssignments[w];
+    if (saved) {
+      assignedPerWeek[w] = saved;
+    } else {
+      const eligible = filterCollectionsForWeek(collectionsWithAvailability, w);
+      assignedPerWeek[w] = eligible.map((c) => String(c.id));
+    }
+  }
+
+  const uniqueIds = [...new Set(Object.values(assignedPerWeek).flat())];
   const bundleCollections = await getBundleCollectionsFromShopify(uniqueIds, { sorted: true });
   const bundleCollectionMap = Object.fromEntries(bundleCollections.map((c) => [c.id, c]));
 
   const collectionsPerWeek = Object.fromEntries(
-    eligiblePerWeek.map(({ weekStart, eligible }) => [
-      weekStart,
-      eligible
-        .map((c) => {
-          const bc = bundleCollectionMap[String(c.id)];
+    weekStarts.map((w) => [
+      w,
+      (assignedPerWeek[w] ?? [])
+        .map((id) => {
+          const bc = bundleCollectionMap[id];
+          const meta = allCollections.find((c) => c.id === id);
           return bc
             ? {
                 ...bc,
-                title: c.title,
-                availableFrom: c.availableFrom?.toISOString().slice(0, 10) ?? null,
-                availableUntil: c.availableUntil?.toISOString().slice(0, 10) ?? null,
+                title: meta?.title ?? bc.title,
+                availableFrom: meta?.availableFrom ?? null,
+                availableUntil: meta?.availableUntil ?? null,
               }
             : null;
         })
@@ -78,7 +99,13 @@ export async function loader() {
     ])
   );
 
-  return json({ weekStarts, collectionsPerWeek, configs });
+  return json({
+    weekStarts,
+    allCollections,
+    assignedPerWeek,
+    collectionsPerWeek,
+    configs,
+  });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -86,6 +113,17 @@ export async function loader() {
 export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
+
+  if (intent === "save_assignments") {
+    const weekStart = formData.get("weekStart");
+    const rawIds = formData.get("collectionIds");
+    if (typeof weekStart !== "string" || typeof rawIds !== "string") {
+      return json({ error: "Invalid payload" }, { status: 400 });
+    }
+    const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
+    saveWeekAssignments(weekStart, collectionIds);
+    return json({ success: true, intent: "save_assignments" as const, weekStart });
+  }
 
   if (intent === "save_config") {
     const weekStart = formData.get("weekStart");
@@ -107,9 +145,15 @@ export async function action({ request }: ActionFunctionArgs) {
     const { targetQuantity } = getWeeklyConfig(weekStart);
 
     try {
-      const collectionsWithAvailability = await getCollectionsWithAvailability();
-      const eligible = filterCollectionsForWeek(collectionsWithAvailability, weekStart);
-      const collectionIds = eligible.map((c) => String(c.id));
+      const saved = getWeekAssignments(weekStart);
+      let collectionIds: string[];
+      if (saved) {
+        collectionIds = saved;
+      } else {
+        const collectionsWithAvailability = await getCollectionsWithAvailability();
+        const eligible = filterCollectionsForWeek(collectionsWithAvailability, weekStart);
+        collectionIds = eligible.map((c) => String(c.id));
+      }
 
       const [bundleCollections, allPreferences, bundleSubIds, charges] = await Promise.all([
         getBundleCollectionsFromShopify(collectionIds, { sorted: true }),
@@ -185,8 +229,10 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MerchantPage() {
-  const { weekStarts, collectionsPerWeek, configs } = useLoaderData<typeof loader>();
+  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs } =
+    useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
+  const [activeView, setActiveView] = useState<ViewMode>("assign");
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -212,11 +258,34 @@ export default function MerchantPage() {
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <div>
-          <h1 className="text-lg font-semibold text-gray-900">Personalized Bundle Defaults</h1>
+          <h1 className="text-lg font-semibold text-gray-900">Weekly Collection Manager</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Products are shown in Shopify collection sort order (your priority ranking).
-            Each customer's bundle is personalized based on their dietary preferences.
+            Assign collections to upcoming weeks, then review sort order and apply personalized defaults.
           </p>
+        </div>
+
+        {/* View navigation */}
+        <div className="flex border-b border-gray-200">
+          <button
+            onClick={() => setActiveView("assign")}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeView === "assign"
+                ? "border-indigo-600 text-indigo-600"
+                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
+            }`}
+          >
+            Assign Collections
+          </button>
+          <button
+            onClick={() => setActiveView("sort-order")}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeView === "sort-order"
+                ? "border-indigo-600 text-indigo-600"
+                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
+            }`}
+          >
+            Sort Order & Defaults
+          </button>
         </div>
 
         {/* Week tabs */}
@@ -236,17 +305,30 @@ export default function MerchantPage() {
           ))}
         </div>
 
-        {/* Active week panel */}
-        {weekStarts.map((week) =>
-          week === activeWeek ? (
-            <WeekPanel
-              key={week}
-              weekStart={week}
-              collections={collectionsPerWeek[week] ?? []}
-              savedConfig={configs[week] ?? null}
-            />
-          ) : null
-        )}
+        {/* Active view content */}
+        {activeView === "assign" &&
+          weekStarts.map((week) =>
+            week === activeWeek ? (
+              <AssignPanel
+                key={week}
+                weekStart={week}
+                allCollections={allCollections}
+                assignedIds={assignedPerWeek[week] ?? []}
+              />
+            ) : null
+          )}
+
+        {activeView === "sort-order" &&
+          weekStarts.map((week) =>
+            week === activeWeek ? (
+              <WeekPanel
+                key={week}
+                weekStart={week}
+                collections={collectionsPerWeek[week] ?? []}
+                savedConfig={configs[week] ?? null}
+              />
+            ) : null
+          )}
       </main>
     </div>
   );
@@ -267,7 +349,175 @@ function formatWeekRangeLabel(weekStart: string): string {
   return `${start.toLocaleDateString("en-US", opts)} – ${end.toLocaleDateString("en-US", opts)}`;
 }
 
-// ─── Week panel ───────────────────────────────────────────────────────────────
+// ─── Assign panel ─────────────────────────────────────────────────────────────
+
+type SimpleCollection = {
+  id: string;
+  title: string;
+  handle: string;
+  availableFrom: string | null;
+  availableUntil: string | null;
+};
+
+function AssignPanel({
+  weekStart,
+  allCollections,
+  assignedIds,
+}: {
+  weekStart: string;
+  allCollections: SimpleCollection[];
+  assignedIds: string[];
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(assignedIds));
+
+  const isSaving = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "save_assignments"; weekStart: string }
+    | { error: string }
+    | undefined;
+  const savedOk = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+  const saveError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? (fetcherData as { error: string }).error
+      : null;
+
+  const hasChanges =
+    selected.size !== assignedIds.length ||
+    [...selected].some((id) => !assignedIds.includes(id));
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelected(new Set(allCollections.map((c) => c.id)));
+  const deselectAll = () => setSelected(new Set());
+
+  const handleSave = () => {
+    fetcher.submit(
+      {
+        intent: "save_assignments",
+        weekStart,
+        collectionIds: [...selected].join(","),
+      },
+      { method: "post" }
+    );
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      {saveError && (
+        <div className="mx-4 mt-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3">
+          <p className="text-sm text-red-800">{saveError}</p>
+        </div>
+      )}
+
+      <div className="px-5 py-4 border-b border-gray-100">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="font-semibold text-gray-900">
+              Week of {formatWeekRangeLabel(weekStart)}
+            </h2>
+            <p className="text-sm text-gray-400 mt-0.5">
+              {selected.size} of {allCollections.length} collection{allCollections.length !== 1 ? "s" : ""} assigned
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {savedOk && (
+              <span className="text-green-600 text-xs font-medium flex items-center gap-1 flex-none">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Saved
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={selectAll}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+          >
+            Select all
+          </button>
+          <span className="text-gray-300">|</span>
+          <button
+            onClick={deselectAll}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+          >
+            Deselect all
+          </button>
+        </div>
+      </div>
+
+      {allCollections.length === 0 ? (
+        <div className="px-5 py-8 text-center text-sm text-gray-400">
+          No Shopify collections found.
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-50">
+          {allCollections.map((collection) => {
+            const isSelected = selected.has(collection.id);
+            return (
+              <label
+                key={collection.id}
+                className={`flex items-center gap-4 px-5 py-3.5 cursor-pointer transition-colors ${
+                  isSelected ? "bg-indigo-50/40" : "hover:bg-gray-50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggle(collection.id)}
+                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 flex-none"
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800">{collection.title}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-xs text-gray-400">{collection.handle}</span>
+                    {(collection.availableFrom || collection.availableUntil) && (
+                      <>
+                        <span className="text-gray-200">·</span>
+                        <span className="text-xs text-gray-400">
+                          {formatDateRange(collection.availableFrom, collection.availableUntil)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {isSelected && (
+                  <svg className="w-4 h-4 text-indigo-500 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between gap-4">
+        <p className="text-xs text-gray-400">
+          Assigned collections will appear in the Sort Order & Defaults view for this week.
+        </p>
+        <button
+          onClick={handleSave}
+          disabled={isSaving || !hasChanges}
+          className="text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-none"
+        >
+          {isSaving ? "Saving…" : "Save assignments"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sort-order / defaults panel ──────────────────────────────────────────────
 
 type CollectionWithDates = BundleCollection & {
   availableFrom: string | null;
@@ -369,14 +619,12 @@ function WeekPanel({
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-      {/* Error banner */}
       {saveError && (
         <div className="mx-4 mt-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3">
           <p className="text-sm text-red-800">{saveError}</p>
         </div>
       )}
 
-      {/* Header */}
       <div className="px-5 py-4 border-b border-gray-100">
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -397,7 +645,6 @@ function WeekPanel({
           )}
         </div>
 
-        {/* Target quantity control */}
         <div className="mt-3 flex items-center gap-3">
           <label className="text-sm text-gray-600">Meals per bundle:</label>
           <div className="flex items-center gap-1.5">
@@ -433,92 +680,83 @@ function WeekPanel({
         </div>
       </div>
 
-      {/* Sorted product list (read-only) */}
       {collections.length === 0 ? (
         <div className="px-5 py-8 text-center text-sm text-gray-400">
-          No products found in the configured collections for this week.
+          No collections assigned for this week. Go to Assign Collections to add some.
         </div>
       ) : (
         <div className="divide-y divide-gray-50">
-          {collections.map((collection) => {
-            const collectionStartPos = positionCounter;
-            return (
-              <div key={collection.id}>
-                <div className="px-5 py-2 bg-gray-50">
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                    {collection.title}
+          {collections.map((collection) => (
+            <div key={collection.id}>
+              <div className="px-5 py-2 bg-gray-50">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                  {collection.title}
+                </p>
+                {(collection.availableFrom || collection.availableUntil) && (
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {formatDateRange(collection.availableFrom, collection.availableUntil)}
                   </p>
-                  {(collection.availableFrom || collection.availableUntil) && (
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {formatDateRange(collection.availableFrom, collection.availableUntil)}
-                    </p>
-                  )}
-                </div>
-                {collection.products.map((product) => {
-                  positionCounter++;
-                  const position = positionCounter;
-                  const dietaryTags = getDietaryTags(product.tags ?? []);
-                  const isWithinTarget = position <= targetQuantity;
-                  return (
-                    <div
-                      key={product.id}
-                      className={`px-5 py-3.5 flex items-center gap-4 transition-colors ${
-                        isWithinTarget ? "bg-indigo-50/40" : "opacity-50"
+                )}
+              </div>
+              {collection.products.map((product) => {
+                positionCounter++;
+                const position = positionCounter;
+                const dietaryTags = getDietaryTags(product.tags ?? []);
+                const isWithinTarget = position <= targetQuantity;
+                return (
+                  <div
+                    key={product.id}
+                    className={`px-5 py-3.5 flex items-center gap-4 transition-colors ${
+                      isWithinTarget ? "bg-indigo-50/40" : "opacity-50"
+                    }`}
+                  >
+                    <span
+                      className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
+                        isWithinTarget
+                          ? "bg-indigo-100 text-indigo-700"
+                          : "bg-gray-100 text-gray-400"
                       }`}
                     >
-                      {/* Position badge */}
-                      <span
-                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
-                          isWithinTarget
-                            ? "bg-indigo-100 text-indigo-700"
-                            : "bg-gray-100 text-gray-400"
-                        }`}
-                      >
-                        {position}
-                      </span>
+                      {position}
+                    </span>
 
-                      {/* Thumbnail */}
-                      {product.image_url ? (
-                        <img
-                          src={product.image_url}
-                          alt={product.title}
-                          className="w-10 h-10 rounded-lg object-cover flex-none bg-gray-100"
-                        />
-                      ) : (
-                        <div className="w-10 h-10 rounded-lg bg-gray-100 flex-none" />
-                      )}
+                    {product.image_url ? (
+                      <img
+                        src={product.image_url}
+                        alt={product.title}
+                        className="w-10 h-10 rounded-lg object-cover flex-none bg-gray-100"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-lg bg-gray-100 flex-none" />
+                    )}
 
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800">{product.title}</p>
-                        {dietaryTags.length > 0 && (
-                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                            {dietaryTags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="text-xs font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded"
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Within-target indicator */}
-                      {isWithinTarget && (
-                        <span className="text-xs text-indigo-500 font-medium flex-none">Default</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-800">{product.title}</p>
+                      {dietaryTags.length > 0 && (
+                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                          {dietaryTags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="text-xs font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
                       )}
                     </div>
-                  );
-                })}
-              </div>
-            );
-          })}
+
+                    {isWithinTarget && (
+                      <span className="text-xs text-indigo-500 font-medium flex-none">Default</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Help text */}
       <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
         <p className="text-xs text-gray-400">
           Priority order is controlled by collection sort order in Shopify admin.
@@ -526,7 +764,6 @@ function WeekPanel({
         </p>
       </div>
 
-      {/* Apply results panel */}
       {(applyResult || applyError) && (
         <div className="border-t border-gray-100 px-5 py-4 space-y-2">
           {applyError && (
@@ -581,9 +818,7 @@ function WeekPanel({
         </div>
       )}
 
-      {/* Footer */}
       <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between gap-4">
-        {/* Left: Apply button / confirmation / spinner */}
         <div className="flex items-center gap-2">
           {isApplying ? (
             <span className="text-sm text-gray-500 flex items-center gap-1.5">
@@ -621,7 +856,6 @@ function WeekPanel({
           )}
         </div>
 
-        {/* Right: Save config */}
         <button
           onClick={handleSave}
           disabled={isSaving || !hasConfigChanges || isApplying}

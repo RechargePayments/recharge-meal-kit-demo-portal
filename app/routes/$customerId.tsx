@@ -366,14 +366,14 @@ export default function Dashboard() {
       <Header customer={customer} refreshing={state === "loading"} addresses={addresses} subscriptions={subscriptions} />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* Subscription summary */}
-        <SubscriptionSummary subscriptions={subscriptions} totalQueued={queuedCharges.length} deliveryDateOffset={deliveryDateOffset} />
-
-        {/* Credits balance */}
-        <CreditsBanner creditSummary={creditSummary} />
-
-        {/* Preferences banner */}
-        <PreferencesBanner preferences={customerPreferences} customerId={String(customer.id)} />
+        {/* Compact info bar: delivery + credits + taste profile */}
+        <DashboardInfoBar
+          subscriptions={subscriptions}
+          deliveryDateOffset={deliveryDateOffset}
+          creditSummary={creditSummary}
+          preferences={customerPreferences}
+          customerId={String(customer.id)}
+        />
 
         {/* Week tabs + Meal grid */}
         {tabsWithBundles.length > 0 ? (
@@ -752,129 +752,21 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
   );
 }
 
-// ─── Subscription summary ─────────────────────────────────────────────────────
-
-function SubscriptionSummary({ subscriptions, totalQueued, deliveryDateOffset }: { subscriptions: Subscription[]; totalQueued: number; deliveryDateOffset: number }) {
-  if (subscriptions.length === 0) return null;
-
-  return (
-    <div className="flex flex-wrap gap-4">
-      {subscriptions.map((sub) => {
-        const chargeDate = sub.next_charge_scheduled_at;
-        const deliveryDate = chargeDate ? addDaysToDate(chargeDate, deliveryDateOffset) : null;
-        return (
-          <div key={sub.id} className="card card-hover flex-1 min-w-[260px] p-5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="font-display font-semibold text-stone-900 truncate">{sub.product_title}</h3>
-                <div className="flex items-center gap-2 mt-1.5">
-                  <StatusBadge status={sub.status} />
-                  {sub.charge_interval_frequency && sub.order_interval_unit && (
-                    <span className="text-xs text-stone-400">
-                      Every {sub.charge_interval_frequency} {sub.order_interval_unit}
-                      {sub.charge_interval_frequency > 1 ? "s" : ""}
-                    </span>
-                  )}
-                </div>
-              </div>
-              {deliveryDate && chargeDate && (
-                <div className="flex-none text-right">
-                  <p className="text-xs text-stone-400">Next delivery</p>
-                  <p className="text-sm font-semibold text-stone-700">{formatDate(deliveryDate)}</p>
-                  <p className="text-xs text-stone-400 mt-0.5">Charged on {formatDate(chargeDate)}</p>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const config: Record<string, { bg: string; text: string; dot: string }> = {
-    active: { bg: "bg-brand-50", text: "text-brand-700", dot: "bg-brand-500" },
-    cancelled: { bg: "bg-stone-100", text: "text-stone-600", dot: "bg-stone-400" },
-    expired: { bg: "bg-amber-50", text: "text-amber-700", dot: "bg-amber-500" },
-  };
-  const c = config[status] ?? config.cancelled;
-  return (
-    <span className={`badge ${c.bg} ${c.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot} ${status === "active" ? "animate-pulse-soft" : ""}`} />
-      {status}
-    </span>
-  );
-}
-
-// ─── Credits banner ───────────────────────────────────────────────────────────
-
-function CreditsBanner({ creditSummary }: { creditSummary: CreditSummary | null }) {
-  if (!creditSummary) return null;
-
-  const totalBalance = parseFloat(creditSummary.total_available_balance);
-  if (totalBalance <= 0) return null;
-
-  const accounts = creditSummary.include?.credit_details?.filter(
-    (a) => parseFloat(a.available_balance) > 0
-  );
-
-  return (
-    <div className="card p-5 bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
-            <svg className="w-5 h-5 text-emerald-600" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
-            </svg>
-          </div>
-          <div>
-            <h3 className="font-display font-semibold text-stone-900">Store Credits</h3>
-            <p className="text-sm text-emerald-700 font-bold">
-              {formatCurrency(creditSummary.total_available_balance, creditSummary.currency_code)} available
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {accounts && accounts.length > 0 && (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {accounts.map((account) => (
-            <div
-              key={account.id}
-              className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/70 rounded-lg border border-emerald-200/60 text-sm"
-            >
-              <span className={`w-2 h-2 rounded-full ${
-                account.type === "reward" ? "bg-amber-400" :
-                account.type === "gift" ? "bg-purple-400" :
-                "bg-emerald-400"
-              }`} />
-              <span className="font-medium text-stone-700">{account.name || account.type}</span>
-              <span className="text-emerald-700 font-semibold">
-                {formatCurrency(account.available_balance, account.currency_code)}
-              </span>
-              {account.expires_at && (
-                <span className="text-xs text-stone-400">
-                  expires {formatDate(account.expires_at)}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Preferences banner ───────────────────────────────────────────────────────
+// ─── Dashboard info bar (compact banners) ─────────────────────────────────────
 
 const MEAL_TYPE_OPTIONS = ["Gluten Free", "Vegetarian"];
 const EXCLUSION_OPTIONS = ["Dairy", "Wheat", "Meat", "Fish"];
 
-function PreferencesBanner({
+function DashboardInfoBar({
+  subscriptions,
+  deliveryDateOffset,
+  creditSummary,
   preferences,
   customerId,
 }: {
+  subscriptions: Subscription[];
+  deliveryDateOffset: number;
+  creditSummary: CreditSummary | null;
   preferences: CustomerPreference | null;
   customerId: string;
 }) {
@@ -903,187 +795,181 @@ function PreferencesBanner({
 
   const hasPrefs = preferences && (preferences.include.length > 0 || preferences.exclude.length > 0);
 
-  if (!editing && !hasPrefs) {
-    return (
-      <div className="card p-5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
-              <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-              </svg>
-            </div>
-            <h3 className="font-display font-semibold text-stone-900">Your Taste Profile</h3>
-          </div>
-          <button
-            onClick={() => setEditing(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-brand-700 bg-brand-50 hover:bg-brand-100 rounded-lg transition-colors border border-brand-200"
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
-            </svg>
-            Set Preferences
-          </button>
-        </div>
-        <p className="text-sm text-stone-500 mt-2">Tell us what you like and what to avoid so we can personalize your meals.</p>
-      </div>
-    );
-  }
+  const activeSub = subscriptions.find((s) => s.status === "active") ?? subscriptions[0];
+  const chargeDate = activeSub?.next_charge_scheduled_at;
+  const deliveryDate = chargeDate ? addDaysToDate(chargeDate, deliveryDateOffset) : null;
+  const freq = activeSub?.charge_interval_frequency && activeSub?.order_interval_unit
+    ? `Every ${activeSub.charge_interval_frequency} ${activeSub.order_interval_unit}${activeSub.charge_interval_frequency > 1 ? "s" : ""}`
+    : null;
 
-  if (editing) {
-    return (
-      <div className="card p-5 ring-2 ring-brand-200">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
-              <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-              </svg>
-            </div>
-            <h3 className="font-display font-semibold text-stone-900">Edit Taste Profile</h3>
-          </div>
-        </div>
-
-        <div className="space-y-5">
-          <div>
-            <h4 className="text-sm font-semibold text-stone-700 mb-2.5">Meal Types I Prefer</h4>
-            <div className="flex flex-wrap gap-2">
-              {MEAL_TYPE_OPTIONS.map((tag) => {
-                const active = selectedIncludes.includes(tag);
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => toggleInclude(tag)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
-                      active
-                        ? "bg-brand-50 text-brand-700 border-brand-300 ring-1 ring-brand-200"
-                        : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
-                    }`}
-                  >
-                    {active && (
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                    {tag}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div>
-            <h4 className="text-sm font-semibold text-stone-700 mb-2.5">Ingredients to Avoid</h4>
-            <div className="flex flex-wrap gap-2">
-              {EXCLUSION_OPTIONS.map((tag) => {
-                const active = selectedExcludes.includes(tag);
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => toggleExclude(tag)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
-                      active
-                        ? "bg-amber-50 text-amber-700 border-amber-300 ring-1 ring-amber-200"
-                        : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
-                    }`}
-                  >
-                    {active && (
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                    {tag}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3 mt-5 pt-4 border-t border-stone-100">
-          <button
-            type="button"
-            disabled={isSaving}
-            onClick={() => {
-              const formData = new FormData();
-              formData.set("intent", "update_preferences");
-              formData.set("customerId", customerId);
-              for (const tag of selectedIncludes) formData.append("include", tag);
-              for (const tag of selectedExcludes) formData.append("exclude", tag);
-              fetcher.submit(formData, { method: "post" });
-            }}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 rounded-lg transition-colors"
-          >
-            {isSaving ? (
-              <>
-                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Saving...
-              </>
-            ) : (
-              "Save Preferences"
-            )}
-          </button>
-          <button
-            type="button"
-            disabled={isSaving}
-            onClick={() => {
-              setSelectedIncludes(preferences?.include ?? []);
-              setSelectedExcludes(preferences?.exclude ?? []);
-              setEditing(false);
-            }}
-            className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const hasCredits = creditSummary && parseFloat(creditSummary.total_available_balance) > 0;
 
   return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-brand-50 flex items-center justify-center">
-            <svg className="w-4 h-4 text-brand-600" viewBox="0 0 20 20" fill="currentColor">
+    <div className="space-y-2">
+      {/* Compact info bar */}
+      <div className="card px-4 py-2.5">
+        <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-stone-150">
+          {/* Delivery cell */}
+          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:pr-4">
+            <svg className="w-4 h-4 text-brand-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M8 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM15 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" />
+              <path d="M0 4a1 1 0 011-1h9a1 1 0 011 1v7h2V8a1 1 0 011-1h2.05l1.82 3.64A1 1 0 0118 11v4h1a1 1 0 110 2h-1.05a2.5 2.5 0 01-4.9 0H7.95a2.5 2.5 0 01-4.9 0H1a1 1 0 01-1-1V4z" />
+            </svg>
+            {activeSub && deliveryDate ? (
+              <div className="flex items-baseline gap-1.5 min-w-0">
+                <span className="text-sm font-semibold text-stone-800 truncate">Next: {formatDate(deliveryDate)}</span>
+                {freq && <span className="text-xs text-stone-400 flex-none">{freq}</span>}
+              </div>
+            ) : (
+              <span className="text-sm text-stone-400">No upcoming delivery</span>
+            )}
+          </div>
+
+          {/* Credits cell */}
+          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:px-4">
+            <svg className="w-4 h-4 text-emerald-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
+            </svg>
+            {hasCredits ? (
+              <span className="text-sm">
+                <span className="font-semibold text-emerald-700">{formatCurrency(creditSummary!.total_available_balance, creditSummary!.currency_code)}</span>
+                <span className="text-stone-400 ml-1">credit</span>
+              </span>
+            ) : (
+              <span className="text-sm text-stone-400">No credits</span>
+            )}
+          </div>
+
+          {/* Taste profile cell */}
+          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:pl-4">
+            <svg className="w-4 h-4 text-brand-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
               <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
             </svg>
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+              {hasPrefs ? (
+                <span className="text-sm text-stone-600 truncate">
+                  {[...preferences!.include, ...preferences!.exclude.map((t) => `No ${t}`)].join(", ")}
+                </span>
+              ) : (
+                <span className="text-sm text-stone-400">No preferences set</span>
+              )}
+            </div>
+            <button
+              onClick={() => setEditing(!editing)}
+              className="text-xs font-medium text-brand-600 hover:text-brand-800 transition-colors flex-none"
+            >
+              {hasPrefs ? "Edit" : "Set"}
+            </button>
           </div>
-          <h3 className="font-display font-semibold text-stone-900">Your Taste Profile</h3>
         </div>
-        <button
-          onClick={() => setEditing(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-stone-500 hover:text-brand-700 hover:bg-brand-50 rounded-lg transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-          </svg>
-          Edit
-        </button>
       </div>
-      <div className="flex flex-wrap gap-2">
-        {preferences!.include.map((tag) => (
-          <span key={tag} className="badge bg-brand-50 text-brand-700 border border-brand-200">
-            <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-            </svg>
-            {tag}
-          </span>
-        ))}
-        {preferences!.exclude.map((tag) => (
-          <span key={tag} className="badge bg-amber-50 text-amber-700 border border-amber-200">
-            <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-            </svg>
-            {tag}
-          </span>
-        ))}
-      </div>
+
+      {/* Expandable edit panel */}
+      {editing && (
+        <div className="card p-5 ring-2 ring-brand-200">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-display font-semibold text-stone-900 text-sm">Edit Taste Profile</h3>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Meal Types I Prefer</h4>
+              <div className="flex flex-wrap gap-2">
+                {MEAL_TYPE_OPTIONS.map((tag) => {
+                  const active = selectedIncludes.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleInclude(tag)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
+                        active
+                          ? "bg-brand-50 text-brand-700 border-brand-300 ring-1 ring-brand-200"
+                          : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
+                      }`}
+                    >
+                      {active && (
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Ingredients to Avoid</h4>
+              <div className="flex flex-wrap gap-2">
+                {EXCLUSION_OPTIONS.map((tag) => {
+                  const active = selectedExcludes.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleExclude(tag)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
+                        active
+                          ? "bg-amber-50 text-amber-700 border-amber-300 ring-1 ring-amber-200"
+                          : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
+                      }`}
+                    >
+                      {active && (
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 mt-4 pt-3 border-t border-stone-100">
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={() => {
+                const formData = new FormData();
+                formData.set("intent", "update_preferences");
+                formData.set("customerId", customerId);
+                for (const tag of selectedIncludes) formData.append("include", tag);
+                for (const tag of selectedExcludes) formData.append("exclude", tag);
+                fetcher.submit(formData, { method: "post" });
+              }}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 rounded-lg transition-colors"
+            >
+              {isSaving ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Saving...
+                </>
+              ) : (
+                "Save"
+              )}
+            </button>
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={() => {
+                setSelectedIncludes(preferences?.include ?? []);
+                setSelectedExcludes(preferences?.exclude ?? []);
+                setEditing(false);
+              }}
+              className="px-4 py-1.5 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

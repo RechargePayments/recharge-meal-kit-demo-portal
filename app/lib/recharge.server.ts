@@ -149,6 +149,7 @@ export async function getBundleCollectionsFromShopify(
             title: v.title,
             sku: v.sku ?? undefined,
             external_product_id: String(p.id),
+            price: v.price ?? undefined,
           })),
         })),
       };
@@ -218,6 +219,26 @@ export async function updateBundleSelection(
     { method: "PUT", body: JSON.stringify({ items }) }
   );
   return BundleSelectionSchema.parse(data.bundle_selection);
+}
+
+// ─── Onetimes (add-ons) ──────────────────────────────────────────────────────
+
+export async function createOnetime(payload: {
+  address_id: number;
+  next_charge_scheduled_at: string;
+  external_product_id: { ecommerce: string };
+  external_variant_id: { ecommerce: string };
+  quantity: number;
+  price: string;
+}): Promise<unknown> {
+  return api("/onetimes", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteOnetime(onetimeId: number): Promise<void> {
+  await api(`/onetimes/${onetimeId}`, { method: "DELETE" });
 }
 
 // ─── Merchant defaults application ───────────────────────────────────────────

@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   getCustomer,
   getCreditSummary,
+  createOnetime,
+  deleteOnetime,
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
   getBundleSelections,
@@ -22,7 +24,8 @@ import {
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import { getDeliveryDateOffset } from "~/lib/merchant-settings.server";
-import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
+import { getAddonCollectionIds } from "~/lib/addon-collections.server";
+import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -49,6 +52,15 @@ type ActiveChargeBundle = {
   collectionsByProductId: Record<string, BundleCollection[]>;
   bundleProductRangesByProductId: Record<string, number[][]>;
   eligibleCollectionIds: string[];
+};
+
+type AddonProduct = {
+  externalProductId: string;
+  externalVariantId: string;
+  title: string;
+  variantTitle: string;
+  imageUrl: string | null;
+  price: string;
 };
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
@@ -139,7 +151,37 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   const deliveryDateOffset = getDeliveryDateOffset();
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary });
+  // Fetch add-on products from merchant-configured collections
+  let addonProducts: AddonProduct[] = [];
+  const addonCollectionIds = getAddonCollectionIds();
+  if (addonCollectionIds.length > 0) {
+    const addonCollections = await getBundleCollectionsFromShopify(addonCollectionIds);
+    const seen = new Set<string>();
+    addonProducts = addonCollections.flatMap((col) =>
+      col.products.flatMap((p) =>
+        p.variants
+          .filter((v) => {
+            if (seen.has(String(v.id))) return false;
+            seen.add(String(v.id));
+            return true;
+          })
+          .map((v) => ({
+            externalProductId: p.external_product_id,
+            externalVariantId: String(v.id),
+            title: p.title,
+            variantTitle: v.title,
+            imageUrl: p.image_url ?? null,
+            price: v.price ?? "0.00",
+          }))
+      )
+    );
+  }
+
+  const activeAddons = activeBundle
+    ? activeBundle.charge.line_items.filter((li) => li.purchase_item_type === "onetime")
+    : [];
+
+  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -214,13 +256,63 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ success: true, chargeId: charge.id });
   }
 
+  if (intent === "add_addon") {
+    const addressId = formData.get("addressId");
+    const scheduledAt = formData.get("scheduledAt");
+    const externalProductId = formData.get("externalProductId");
+    const externalVariantId = formData.get("externalVariantId");
+    const price = formData.get("price");
+    const rawQty = formData.get("quantity");
+
+    if (
+      typeof addressId !== "string" ||
+      typeof scheduledAt !== "string" ||
+      typeof externalProductId !== "string" ||
+      typeof externalVariantId !== "string" ||
+      typeof price !== "string"
+    ) {
+      return json({ error: "Missing required fields", intent: "add_addon" as const }, { status: 400 });
+    }
+
+    const quantity = rawQty ? Number(rawQty) : 1;
+
+    try {
+      await createOnetime({
+        address_id: Number(addressId),
+        next_charge_scheduled_at: scheduledAt.slice(0, 10),
+        external_product_id: { ecommerce: externalProductId },
+        external_variant_id: { ecommerce: externalVariantId },
+        quantity,
+        price,
+      });
+      return json({ success: true, intent: "add_addon" as const });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to add add-on.";
+      return json({ error: message, intent: "add_addon" as const });
+    }
+  }
+
+  if (intent === "remove_addon") {
+    const onetimeId = formData.get("onetimeId");
+    if (typeof onetimeId !== "string") {
+      return json({ error: "Missing onetimeId", intent: "remove_addon" as const }, { status: 400 });
+    }
+    try {
+      await deleteOnetime(Number(onetimeId));
+      return json({ success: true, intent: "remove_addon" as const });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to remove add-on.";
+      return json({ error: message, intent: "remove_addon" as const });
+    }
+  }
+
   return json({ error: "Unknown intent" }, { status: 400 });
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary } =
+  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -284,6 +376,18 @@ export default function Dashboard() {
                     deliveryDateOffset={deliveryDateOffset}
                   />
                 ))}
+
+                {activeAddons.length > 0 && (
+                  <AddedAddOns items={activeAddons} addonProducts={addonProducts} />
+                )}
+
+                {addonProducts.length > 0 && (
+                  <AddOnsCarousel
+                    products={addonProducts}
+                    addressId={activeBundle.charge.address_id ?? 0}
+                    scheduledAt={activeBundle.charge.scheduled_at}
+                  />
+                )}
               </div>
             ) : null}
           </section>
@@ -1177,6 +1281,268 @@ function MealGrid({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Added add-ons (onetime line items) ───────────────────────────────────────
+
+function AddedAddOns({ items, addonProducts }: { items: ChargeLineItem[]; addonProducts: AddonProduct[] }) {
+  if (items.length === 0) return null;
+
+  const imageByVariantId = Object.fromEntries(
+    addonProducts.filter((p) => p.imageUrl).map((p) => [p.externalVariantId, p.imageUrl])
+  );
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-full bg-purple-50 flex items-center justify-center">
+          <svg className="w-4 h-4 text-purple-600" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 2a4 4 0 00-4 4v1H5a1 1 0 00-.994.89l-1 9A1 1 0 004 18h12a1 1 0 00.994-1.11l-1-9A1 1 0 0015 7h-1V6a4 4 0 00-4-4zm2 5V6a2 2 0 10-4 0v1h4zm-6 3a1 1 0 112 0 1 1 0 01-2 0zm7-1a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+          </svg>
+        </div>
+        <h3 className="font-display text-lg font-bold text-stone-900">Your Add-Ons</h3>
+        <span className="text-xs font-semibold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
+          {items.length}
+        </span>
+      </div>
+
+      <div className="card divide-y divide-stone-100 overflow-hidden">
+        {items.map((item) => (
+          <AddedAddonRow key={item.purchase_item_id} item={item} imageByVariantId={imageByVariantId} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AddedAddonRow({ item, imageByVariantId }: { item: ChargeLineItem; imageByVariantId: Record<string, string | null> }) {
+  const fetcher = useFetcher<typeof action>();
+  const isRemoving = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "remove_addon" }
+    | { error: string; intent: "remove_addon" }
+    | undefined;
+  const removeError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? (fetcherData as { error: string }).error
+      : null;
+
+  const handleRemove = () => {
+    fetcher.submit(
+      { intent: "remove_addon", onetimeId: String(item.purchase_item_id) },
+      { method: "post" }
+    );
+  };
+
+  const variantId = item.external_variant_id?.ecommerce ?? null;
+  const imageUrl =
+    item.images?.medium ?? item.images?.small ?? item.images?.original
+    ?? (variantId ? imageByVariantId[variantId] : null)
+    ?? null;
+
+  return (
+    <div className={`flex items-center gap-4 px-4 py-3 transition-opacity ${isRemoving ? "opacity-40" : ""}`}>
+      {imageUrl ? (
+        <img
+          src={imageUrl}
+          alt={item.title}
+          className="w-12 h-12 rounded-lg object-cover flex-none bg-stone-100"
+        />
+      ) : (
+        <div className="w-12 h-12 rounded-lg bg-stone-100 flex items-center justify-center flex-none">
+          <svg className="w-5 h-5 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        </div>
+      )}
+
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-stone-800 truncate">{item.title}</p>
+        {item.variant_title && item.variant_title !== "Default Title" && (
+          <p className="text-xs text-stone-400 truncate">{item.variant_title}</p>
+        )}
+        {removeError && (
+          <p className="text-xs text-red-600 mt-0.5">{removeError}</p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1 flex-none">
+        {item.quantity > 1 && (
+          <span className="text-xs text-stone-400 mr-1">x{item.quantity}</span>
+        )}
+        <span className="text-sm font-bold text-stone-900">{formatCurrency(item.total_price)}</span>
+      </div>
+
+      <button
+        onClick={handleRemove}
+        disabled={isRemoving}
+        className="flex-none w-8 h-8 rounded-lg flex items-center justify-center text-stone-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
+        title="Remove add-on"
+      >
+        {isRemoving ? (
+          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        ) : (
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+// ─── Add-ons carousel ─────────────────────────────────────────────────────────
+
+function AddOnsCarousel({
+  products,
+  addressId,
+  scheduledAt,
+}: {
+  products: AddonProduct[];
+  addressId: number;
+  scheduledAt: string;
+}) {
+  if (products.length === 0) return null;
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-full bg-amber-50 flex items-center justify-center">
+          <svg className="w-4 h-4 text-amber-600" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
+          </svg>
+        </div>
+        <h3 className="font-display text-lg font-bold text-stone-900">Add Something Extra</h3>
+      </div>
+
+      <div className="flex gap-4 overflow-x-auto pb-4 snap-x snap-mandatory scrollbar-hide -mx-1 px-1">
+        {products.map((product) => (
+          <AddOnCard
+            key={product.externalVariantId}
+            product={product}
+            addressId={addressId}
+            scheduledAt={scheduledAt}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AddOnCard({
+  product,
+  addressId,
+  scheduledAt,
+}: {
+  product: AddonProduct;
+  addressId: number;
+  scheduledAt: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const isAdding = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "add_addon" }
+    | { error: string; intent: "add_addon" }
+    | undefined;
+  const wasAdded = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+  const addError = fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+    ? (fetcherData as { error: string }).error
+    : null;
+
+  const handleAdd = () => {
+    fetcher.submit(
+      {
+        intent: "add_addon",
+        addressId: String(addressId),
+        scheduledAt,
+        externalProductId: product.externalProductId,
+        externalVariantId: product.externalVariantId,
+        price: product.price,
+        quantity: "1",
+      },
+      { method: "post" }
+    );
+  };
+
+  return (
+    <div className="card flex flex-col flex-none w-44 sm:w-48 snap-start overflow-hidden transition-all duration-200 hover:-translate-y-0.5">
+      <div className="relative aspect-square bg-stone-50 overflow-hidden flex-none">
+        {product.imageUrl ? (
+          <img
+            src={product.imageUrl}
+            alt={product.title}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-stone-50 to-stone-100">
+            <svg className="w-10 h-10 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col flex-1 p-3 text-center">
+        <h4 className="text-sm font-semibold text-stone-800 leading-tight line-clamp-2">
+          {product.title}
+        </h4>
+        {product.variantTitle && product.variantTitle !== "Default Title" && (
+          <p className="text-xs text-stone-400 line-clamp-1 mt-1">{product.variantTitle}</p>
+        )}
+        <p className="text-sm font-bold text-stone-900 mt-1">
+          {formatCurrency(product.price)}
+        </p>
+
+        <div className="mt-auto pt-2">
+        {wasAdded ? (
+          <div className="flex items-center justify-center gap-1 py-2">
+            <svg className="w-4 h-4 animate-check-pop" style={{ color: "#22c55e" }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-sm font-medium" style={{ color: "#16a34a" }}>Added!</span>
+          </div>
+        ) : addError ? (
+          <div className="space-y-1">
+            <p className="text-xs text-red-600 line-clamp-2">{addError}</p>
+            <button
+              onClick={handleAdd}
+              className="w-full py-2 text-sm font-semibold text-white rounded-lg transition-colors"
+              style={{ backgroundColor: "#22c55e" }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#16a34a"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#22c55e"; }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleAdd}
+            disabled={isAdding}
+            className="w-full py-2 text-sm font-semibold text-white rounded-lg transition-colors disabled:opacity-50"
+            style={{ backgroundColor: "#22c55e" }}
+            onMouseEnter={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#16a34a"; }}
+            onMouseLeave={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#22c55e"; }}
+          >
+            {isAdding ? (
+              <span className="flex items-center justify-center gap-1.5">
+                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Adding...
+              </span>
+            ) : (
+              "Add to Order"
+            )}
+          </button>
+        )}
+        </div>
+      </div>
     </div>
   );
 }

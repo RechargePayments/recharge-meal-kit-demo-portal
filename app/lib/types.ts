@@ -222,6 +222,41 @@ export const AddressSchema = z.object({
 
 export type Address = z.infer<typeof AddressSchema>;
 
+// ─── Payment Method ──────────────────────────────────────────────────────────
+
+export const PaymentMethodSchema = z.object({
+  id: z.number(),
+  customer_id: z.number(),
+  payment_type: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+  payment_details: z
+    .object({
+      brand: z.string().nullable().optional(),
+      exp_month: z.number().nullable().optional(),
+      exp_year: z.number().nullable().optional(),
+      last4: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+  billing_address: z
+    .object({
+      address1: z.string().nullable().optional(),
+      address2: z.string().nullable().optional(),
+      city: z.string().nullable().optional(),
+      province: z.string().nullable().optional(),
+      zip: z.string().nullable().optional(),
+      country: z.string().nullable().optional(),
+      first_name: z.string().nullable().optional(),
+      last_name: z.string().nullable().optional(),
+      company: z.string().nullable().optional(),
+      phone: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+export type PaymentMethod = z.infer<typeof PaymentMethodSchema>;
+
 // ─── API update payload ───────────────────────────────────────────────────────
 
 export type BundleItemPayload = Pick<

@@ -32,16 +32,35 @@ function authHeaders(): Record<string, string> {
   };
 }
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: { ...authHeaders(), ...(options.headers as Record<string, string> ?? {}) },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Recharge ${res.status} — ${path}: ${text}`);
+async function api<T>(
+  path: string,
+  options: RequestInit = {},
+  maxRetries = 3
+): Promise<T> {
+  const headers = { ...authHeaders(), ...(options.headers as Record<string, string> ?? {}) };
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+
+    if (res.status === 429) {
+      if (attempt === maxRetries) {
+        throw new Error(`Recharge 429 — ${path}: rate limited after ${maxRetries + 1} attempts`);
+      }
+      const retryAfter = Number(res.headers.get("Retry-After")) || 0;
+      const backoff = Math.max(retryAfter * 1000, 1000 * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, backoff));
+      continue;
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`Recharge ${res.status} — ${path}: ${text}`);
+    }
+
+    return res.json() as Promise<T>;
   }
-  return res.json() as Promise<T>;
+
+  throw new Error(`Recharge — ${path}: exhausted retries`);
 }
 
 // ─── Customer ─────────────────────────────────────────────────────────────────

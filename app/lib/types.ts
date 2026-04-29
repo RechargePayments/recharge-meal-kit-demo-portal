@@ -202,6 +202,26 @@ export const CreditSummarySchema = z.object({
 
 export type CreditSummary = z.infer<typeof CreditSummarySchema>;
 
+// ─── Address ──────────────────────────────────────────────────────────────────
+
+export const AddressSchema = z.object({
+  id: z.number(),
+  customer_id: z.number(),
+  first_name: z.string().nullable().optional().default(""),
+  last_name: z.string().nullable().optional().default(""),
+  address1: z.string().nullable().optional().default(""),
+  address2: z.string().nullable().optional(),
+  city: z.string().nullable().optional().default(""),
+  province: z.string().nullable().optional().default(""),
+  zip: z.string().nullable().optional().default(""),
+  country: z.string().nullable().optional().default(""),
+  country_code: z.string().nullable().optional().default(""),
+  company: z.string().nullable().optional(),
+  phone: z.string().nullable().optional(),
+});
+
+export type Address = z.infer<typeof AddressSchema>;
+
 // ─── API update payload ───────────────────────────────────────────────────────
 
 export type BundleItemPayload = Pick<

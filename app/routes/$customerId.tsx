@@ -11,9 +11,11 @@ import {
   getBundleProductInfo,
   getBundleSelections,
   getSubscription,
+  listAddresses,
   listQueuedCharges,
   listSubscriptions,
   skipCharge,
+  updateAddress,
   updateBundleSelection,
   updateSubscriptionProperties,
 } from "~/lib/recharge.server";
@@ -25,7 +27,7 @@ import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import { getDeliveryDateOffset } from "~/lib/merchant-settings.server";
 import { getAddonCollectionIds } from "~/lib/addon-collections.server";
-import type { BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
+import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -76,12 +78,13 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const selectedWeek = url.searchParams.get("week");
 
   // Phase 1: Light data — Recharge only, no Shopify calls
-  const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary] = await Promise.all([
+  const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary, addresses] = await Promise.all([
     getCustomer(customerId),
     listSubscriptions(customerId),
     listQueuedCharges(customerId),
     Promise.resolve(getCustomerPreferences(customerId)),
     getCreditSummary(customerId).catch(() => null),
+    listAddresses(customerId),
   ]);
 
   // Phase 2: Check which charges have bundles (Recharge API only)
@@ -181,7 +184,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? activeBundle.charge.line_items.filter((li) => li.purchase_item_type === "onetime")
     : [];
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons });
+  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons, addresses });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -306,13 +309,40 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  if (intent === "update_address") {
+    const addressId = formData.get("addressId");
+    if (typeof addressId !== "string") {
+      return json({ error: "Missing addressId", intent: "update_address" as const }, { status: 400 });
+    }
+
+    const fields: Record<string, string> = {};
+    for (const key of ["first_name", "last_name", "address1", "address2", "city", "province", "zip", "country_code", "phone"]) {
+      const val = formData.get(key);
+      if (typeof val === "string" && val.trim() !== "") {
+        fields[key] = val.trim();
+      }
+    }
+
+    if (Object.keys(fields).length === 0) {
+      return json({ error: "No fields to update", intent: "update_address" as const }, { status: 400 });
+    }
+
+    try {
+      await updateAddress(Number(addressId), fields);
+      return json({ success: true, intent: "update_address" as const });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update address.";
+      return json({ error: message, intent: "update_address" as const });
+    }
+  }
+
   return json({ error: "Unknown intent" }, { status: 400 });
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons } =
+  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons, addresses } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -333,7 +363,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-cream bg-grain">
-      <Header customer={customer} refreshing={state === "loading"} />
+      <Header customer={customer} refreshing={state === "loading"} addresses={addresses} subscriptions={subscriptions} />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {/* Subscription summary */}
@@ -440,39 +470,285 @@ function LeafIcon({ className }: { className?: string }) {
   );
 }
 
-function Header({ customer, refreshing }: { customer: Customer; refreshing: boolean }) {
-  return (
-    <header className="bg-white border-b border-stone-200">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Link to="/" className="flex items-center group">
-            <img
-              src="/logo.png"
-              alt="Recharge Meals"
-              className="h-12 sm:h-14 w-auto group-hover:scale-[1.02] transition-transform"
-            />
-          </Link>
-          {refreshing && (
-            <span className="text-xs text-stone-400 animate-pulse-soft ml-2">Syncing...</span>
-          )}
-        </div>
+const COUNTRIES: Record<string, string> = {
+  US: "United States",
+  CA: "Canada",
+  GB: "United Kingdom",
+  AU: "Australia",
+  NZ: "New Zealand",
+  IE: "Ireland",
+  DE: "Germany",
+  FR: "France",
+  ES: "Spain",
+  IT: "Italy",
+  NL: "Netherlands",
+  BE: "Belgium",
+  AT: "Austria",
+  CH: "Switzerland",
+  SE: "Sweden",
+  NO: "Norway",
+  DK: "Denmark",
+  FI: "Finland",
+  PT: "Portugal",
+  JP: "Japan",
+  SG: "Singapore",
+  HK: "Hong Kong",
+  IN: "India",
+  BR: "Brazil",
+  MX: "Mexico",
+  IL: "Israel",
+  AE: "United Arab Emirates",
+  ZA: "South Africa",
+  PL: "Poland",
+  CZ: "Czech Republic",
+};
 
-        <div className="flex items-center gap-3">
-          <p className="text-sm text-stone-500 hidden sm:block">{customer.email}</p>
-          <div className="w-10 h-10 rounded-full bg-brand-100 border-2 border-brand-200 flex items-center justify-center shrink-0">
-            {customer.first_name?.[0] ? (
-              <span className="text-sm font-bold text-brand-700">
-                {customer.first_name[0]}{customer.last_name?.[0]}
-              </span>
-            ) : (
-              <svg className="w-5 h-5 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-              </svg>
+function countryName(code: string): string {
+  return COUNTRIES[code.toUpperCase()] ?? code;
+}
+
+function formatAddress(addr: Address): string {
+  const parts = [addr.address1];
+  if (addr.address2) parts.push(addr.address2);
+  parts.push(addr.city);
+  const stateZip = [addr.province, addr.zip].filter(Boolean).join(" ");
+  if (stateZip) parts.push(stateZip);
+  if (addr.country_code) parts.push(countryName(addr.country_code));
+  return parts.filter(Boolean).join(", ");
+}
+
+function Header({
+  customer,
+  refreshing,
+  addresses,
+  subscriptions,
+}: {
+  customer: Customer;
+  refreshing: boolean;
+  addresses: Address[];
+  subscriptions: Subscription[];
+}) {
+  const [editingAddress, setEditingAddress] = useState<Address | null>(null);
+
+  const primaryAddressId = subscriptions.find((s) => s.status === "active")?.address_id;
+  const primaryAddress = addresses.find((a) => a.id === primaryAddressId) ?? addresses[0] ?? null;
+  const [selectedAddressId, setSelectedAddressId] = useState<number | null>(null);
+  const displayAddress = (selectedAddressId ? addresses.find((a) => a.id === selectedAddressId) : primaryAddress) ?? primaryAddress;
+
+  return (
+    <>
+      <header className="bg-white border-b border-stone-200">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Link to="/" className="flex items-center group">
+              <img
+                src="/logo.png"
+                alt="Recharge Meals"
+                className="h-12 sm:h-14 w-auto group-hover:scale-[1.02] transition-transform"
+              />
+            </Link>
+            {refreshing && (
+              <span className="text-xs text-stone-400 animate-pulse-soft ml-2">Syncing...</span>
             )}
           </div>
+
+          <div className="flex items-center gap-3">
+            <p className="text-sm text-stone-500 hidden sm:block">{customer.email}</p>
+            <div className="w-10 h-10 rounded-full bg-brand-100 border-2 border-brand-200 flex items-center justify-center shrink-0">
+              {customer.first_name?.[0] ? (
+                <span className="text-sm font-bold text-brand-700">
+                  {customer.first_name[0]}{customer.last_name?.[0]}
+                </span>
+              ) : (
+                <svg className="w-5 h-5 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                </svg>
+              )}
+            </div>
+          </div>
         </div>
+
+        {displayAddress && (
+          <div className="border-t border-stone-100">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <svg className="w-4 h-4 text-brand-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+                </svg>
+                <span className="text-sm text-stone-600 truncate">
+                  <span className="font-medium text-stone-700">Delivering to</span>{" "}
+                  {formatAddress(displayAddress)}
+                </span>
+
+                {addresses.length > 1 && (
+                  <select
+                    className="ml-2 text-xs border border-stone-200 rounded-md px-2 py-1 bg-white text-stone-600 focus:outline-none focus:ring-1 focus:ring-brand-300"
+                    value={displayAddress.id}
+                    onChange={(e) => setSelectedAddressId(Number(e.target.value))}
+                  >
+                    {addresses.map((addr) => (
+                      <option key={addr.id} value={addr.id}>
+                        {addr.address1}, {addr.city}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setEditingAddress(displayAddress)}
+                className="shrink-0 p-1.5 rounded-md text-stone-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
+                title="Edit address"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+      </header>
+
+      {editingAddress && (
+        <AddressEditModal
+          address={editingAddress}
+          onClose={() => setEditingAddress(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── Address edit modal ───────────────────────────────────────────────────────
+
+function AddressEditModal({ address, onClose }: { address: Address; onClose: () => void }) {
+  const fetcher = useFetcher();
+  const formRef = useRef<HTMLFormElement>(null);
+  const isSubmitting = fetcher.state !== "idle";
+  const prevState = useRef(fetcher.state);
+
+  useEffect(() => {
+    if (prevState.current === "loading" && fetcher.state === "idle" && fetcher.data) {
+      const data = fetcher.data as { success?: boolean; error?: string };
+      if (data.success) onClose();
+    }
+    prevState.current = fetcher.state;
+  }, [fetcher.state, fetcher.data, onClose]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  const error = (fetcher.data as { error?: string } | undefined)?.error;
+
+  const fieldClass =
+    "w-full rounded-lg border border-stone-200 px-3 py-2 text-sm text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-300 transition-colors";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100">
+          <h2 className="font-display font-semibold text-lg text-stone-900">Edit shipping address</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <fetcher.Form method="post" ref={formRef} className="px-6 py-5 space-y-4">
+          <input type="hidden" name="intent" value="update_address" />
+          <input type="hidden" name="addressId" value={address.id} />
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">First name</label>
+              <input name="first_name" defaultValue={address.first_name} className={fieldClass} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Last name</label>
+              <input name="last_name" defaultValue={address.last_name} className={fieldClass} />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Address</label>
+            <input name="address1" defaultValue={address.address1} className={fieldClass} />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Apartment, suite, etc.</label>
+            <input name="address2" defaultValue={address.address2 ?? ""} placeholder="Optional" className={fieldClass} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">City</label>
+              <input name="city" defaultValue={address.city} className={fieldClass} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">State / Province</label>
+              <input name="province" defaultValue={address.province} className={fieldClass} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">ZIP / Postal code</label>
+              <input name="zip" defaultValue={address.zip} className={fieldClass} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Country</label>
+              <select name="country_code" defaultValue={address.country_code} className={fieldClass}>
+                <option value="" disabled>Select country</option>
+                {Object.entries(COUNTRIES).map(([code, name]) => (
+                  <option key={code} value={code}>{name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Phone</label>
+            <input name="phone" defaultValue={address.phone ?? ""} placeholder="Optional" className={fieldClass} />
+          </div>
+
+          {error && (
+            <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-2.5 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? "Saving..." : "Save address"}
+            </button>
+          </div>
+        </fetcher.Form>
       </div>
-    </header>
+    </div>
   );
 }
 

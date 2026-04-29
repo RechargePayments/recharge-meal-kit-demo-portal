@@ -36,6 +36,10 @@ import {
   getDeliveryDateOffset,
   saveDeliveryDateOffset,
 } from "~/lib/merchant-settings.server";
+import {
+  getAddonCollectionIds,
+  saveAddonCollectionIds,
+} from "~/lib/addon-collections.server";
 import type { BundleCollection } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
@@ -47,7 +51,7 @@ type ApplyChargeResult = {
   error?: string;
 };
 
-type ViewMode = "assign" | "sort-order";
+type ViewMode = "assign" | "sort-order" | "addons";
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +108,7 @@ export async function loader() {
   );
 
   const deliveryDateOffset = getDeliveryDateOffset();
+  const addonCollectionIds = getAddonCollectionIds();
 
   return json({
     weekStarts,
@@ -112,6 +117,7 @@ export async function loader() {
     collectionsPerWeek,
     configs,
     deliveryDateOffset,
+    addonCollectionIds,
   });
 }
 
@@ -243,13 +249,23 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ success: true, intent: "save_delivery_offset" as const });
   }
 
+  if (intent === "save_addon_collections") {
+    const rawIds = formData.get("collectionIds");
+    if (typeof rawIds !== "string") {
+      return json({ error: "Invalid payload" }, { status: 400 });
+    }
+    const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
+    saveAddonCollectionIds(collectionIds);
+    return json({ success: true, intent: "save_addon_collections" as const });
+  }
+
   return json({ error: "Unknown intent" }, { status: 400 });
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MerchantPage() {
-  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs, deliveryDateOffset } =
+  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs, deliveryDateOffset, addonCollectionIds } =
     useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
   const [activeView, setActiveView] = useState<ViewMode>("assign");
@@ -308,24 +324,36 @@ export default function MerchantPage() {
           >
             Sort Order & Defaults
           </button>
+          <button
+            onClick={() => setActiveView("addons")}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeView === "addons"
+                ? "border-indigo-600 text-indigo-600"
+                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
+            }`}
+          >
+            Add-On Collections
+          </button>
         </div>
 
-        {/* Week tabs */}
-        <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
-          {weekStarts.map((week) => (
-            <button
-              key={week}
-              onClick={() => setActiveWeek(week)}
-              className={`flex-1 text-sm font-medium py-1.5 px-2 rounded-lg transition-colors ${
-                activeWeek === week
-                  ? "bg-white text-gray-900 shadow-sm"
-                  : "text-gray-500 hover:text-gray-800"
-              }`}
-            >
-              {formatTabLabel(week)}
-            </button>
-          ))}
-        </div>
+        {/* Week tabs (hidden for addons view since collections are global) */}
+        {activeView !== "addons" && (
+          <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
+            {weekStarts.map((week) => (
+              <button
+                key={week}
+                onClick={() => setActiveWeek(week)}
+                className={`flex-1 text-sm font-medium py-1.5 px-2 rounded-lg transition-colors ${
+                  activeWeek === week
+                    ? "bg-white text-gray-900 shadow-sm"
+                    : "text-gray-500 hover:text-gray-800"
+                }`}
+              >
+                {formatTabLabel(week)}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Active view content */}
         {activeView === "assign" &&
@@ -351,6 +379,13 @@ export default function MerchantPage() {
               />
             ) : null
           )}
+
+        {activeView === "addons" && (
+          <AddonCollectionsPanel
+            allCollections={allCollections}
+            savedIds={addonCollectionIds}
+          />
+        )}
       </main>
     </div>
   );
@@ -932,6 +967,161 @@ function WeekPanel({
           className="text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {isSaving ? "Saving…" : "Save config"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Add-on collections panel ─────────────────────────────────────────────────
+
+function AddonCollectionsPanel({
+  allCollections,
+  savedIds,
+}: {
+  allCollections: SimpleCollection[];
+  savedIds: string[];
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(savedIds));
+
+  const isSaving = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "save_addon_collections" }
+    | { error: string }
+    | undefined;
+  const savedOk = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+  const saveError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? (fetcherData as { error: string }).error
+      : null;
+
+  const hasChanges =
+    selected.size !== savedIds.length ||
+    [...selected].some((id) => !savedIds.includes(id));
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelected(new Set(allCollections.map((c) => c.id)));
+  const deselectAll = () => setSelected(new Set());
+
+  const handleSave = () => {
+    fetcher.submit(
+      {
+        intent: "save_addon_collections",
+        collectionIds: [...selected].join(","),
+      },
+      { method: "post" }
+    );
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      {saveError && (
+        <div className="mx-4 mt-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3">
+          <p className="text-sm text-red-800">{saveError}</p>
+        </div>
+      )}
+
+      <div className="px-5 py-4 border-b border-gray-100">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <svg className="w-4 h-4 text-indigo-500 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              <h2 className="font-semibold text-gray-900">Add-On Collections</h2>
+            </div>
+            <p className="text-sm text-gray-400 mt-0.5">
+              Select which collections customers can browse as add-ons. Products from these collections
+              will appear as one-time purchase options alongside their weekly bundle.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {savedOk && !hasChanges && (
+              <span className="text-green-600 text-xs font-medium flex items-center gap-1 flex-none">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Saved
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={selectAll}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+          >
+            Select all
+          </button>
+          <span className="text-gray-300">|</span>
+          <button
+            onClick={deselectAll}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+          >
+            Deselect all
+          </button>
+          <span className="text-gray-300 ml-1">·</span>
+          <span className="text-xs text-gray-400 ml-1">
+            {selected.size} of {allCollections.length} selected
+          </span>
+        </div>
+      </div>
+
+      {allCollections.length === 0 ? (
+        <div className="px-5 py-8 text-center text-sm text-gray-400">
+          No Shopify collections found.
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-50">
+          {allCollections.map((collection) => {
+            const isSelected = selected.has(collection.id);
+            return (
+              <label
+                key={collection.id}
+                className={`flex items-center gap-4 px-5 py-3.5 cursor-pointer transition-colors ${
+                  isSelected ? "bg-indigo-50/40" : "hover:bg-gray-50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggle(collection.id)}
+                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 flex-none"
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800">{collection.title}</p>
+                  <span className="text-xs text-gray-400">{collection.handle}</span>
+                </div>
+                {isSelected && (
+                  <svg className="w-4 h-4 text-indigo-500 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between gap-4">
+        <p className="text-xs text-gray-400">
+          Selected collections will appear as add-on options for customers on their delivery dashboard.
+        </p>
+        <button
+          onClick={handleSave}
+          disabled={isSaving || !hasChanges}
+          className="text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-none"
+        >
+          {isSaving ? "Saving…" : "Save add-ons"}
         </button>
       </div>
     </div>

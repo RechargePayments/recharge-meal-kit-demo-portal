@@ -49,6 +49,7 @@ const ShopifyVariantSchema = z.object({
   id: z.number(),
   title: z.string(),
   sku: z.string().nullable().optional(),
+  price: z.string().optional(),
 });
 
 const ShopifyProductSchema = z.object({

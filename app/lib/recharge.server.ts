@@ -6,6 +6,7 @@ import {
   BundleSelectionSchema,
   BundleCollectionSchema,
   CreditSummarySchema,
+  AddressSchema,
   type Customer,
   type Subscription,
   type Charge,
@@ -13,6 +14,7 @@ import {
   type BundleCollection,
   type BundleItemPayload,
   type CreditSummary,
+  type Address,
   type Property,
 } from "./types";
 import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
@@ -239,6 +241,26 @@ export async function createOnetime(payload: {
 
 export async function deleteOnetime(onetimeId: number): Promise<void> {
   await api(`/onetimes/${onetimeId}`, { method: "DELETE" });
+}
+
+// ─── Addresses ────────────────────────────────────────────────────────────────
+
+export async function listAddresses(customerId: string): Promise<Address[]> {
+  const data = await api<{ addresses: unknown[] }>(
+    `/addresses?customer_id=${customerId}&limit=50`
+  );
+  return z.array(AddressSchema).parse(data.addresses);
+}
+
+export async function updateAddress(
+  addressId: number,
+  fields: Partial<Omit<Address, "id" | "customer_id">>
+): Promise<Address> {
+  const data = await api<{ address: unknown }>(`/addresses/${addressId}`, {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  });
+  return AddressSchema.parse(data.address);
 }
 
 // ─── Merchant defaults application ───────────────────────────────────────────

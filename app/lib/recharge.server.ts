@@ -7,6 +7,7 @@ import {
   BundleCollectionSchema,
   CreditSummarySchema,
   AddressSchema,
+  PaymentMethodSchema,
   type Customer,
   type Subscription,
   type Charge,
@@ -15,6 +16,7 @@ import {
   type BundleItemPayload,
   type CreditSummary,
   type Address,
+  type PaymentMethod,
   type Property,
 } from "./types";
 import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
@@ -74,6 +76,39 @@ export async function getCustomerByEmail(email: string): Promise<Customer | null
   const data = await api<{ customers: unknown[] }>(`/customers?email=${encodeURIComponent(email)}&limit=1`);
   const customers = z.array(CustomerSchema).parse(data.customers);
   return customers[0] ?? null;
+}
+
+export async function updateCustomer(
+  customerId: string,
+  fields: Partial<Pick<Customer, "email" | "first_name" | "last_name">> & { phone?: string }
+): Promise<Customer> {
+  const data = await api<{ customer: unknown }>(`/customers/${customerId}`, {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  });
+  return CustomerSchema.parse(data.customer);
+}
+
+// ─── Payment Methods ─────────────────────────────────────────────────────────
+
+export async function listPaymentMethods(customerId: string): Promise<PaymentMethod[]> {
+  const data = await api<{ payment_methods: unknown[] }>(
+    `/payment_methods?customer_id=${customerId}&limit=50`
+  );
+  return z.array(PaymentMethodSchema).parse(data.payment_methods);
+}
+
+export async function sendPaymentUpdateNotification(
+  customerId: string,
+  paymentMethodId: number
+): Promise<void> {
+  await api(`/notifications/customer`, {
+    method: "POST",
+    body: JSON.stringify({
+      type: "SHOPIFY_UPDATE_PAYMENT_INFO",
+      template_vars: { customer_id: Number(customerId), payment_method_id: String(paymentMethodId) },
+    }),
+  });
 }
 
 // ─── Credits ─────────────────────────────────────────────────────────────────

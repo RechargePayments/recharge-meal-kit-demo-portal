@@ -442,49 +442,36 @@ function LeafIcon({ className }: { className?: string }) {
 
 function Header({ customer, refreshing }: { customer: Customer; refreshing: boolean }) {
   return (
-    <header className="relative overflow-hidden">
-      <div className="bg-gradient-to-r from-brand-800 via-brand-700 to-brand-600">
-        {/* Decorative bg */}
-        <div className="absolute inset-0 overflow-hidden">
-          <div className="absolute -top-20 -right-20 w-80 h-80 bg-brand-500/20 rounded-full" />
-          <div className="absolute -bottom-16 -left-16 w-64 h-64 bg-brand-400/10 rounded-full" />
+    <header className="bg-white border-b border-stone-200">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Link to="/" className="flex items-center group">
+            <img
+              src="/logo.png"
+              alt="Recharge Meals"
+              className="h-12 sm:h-14 w-auto group-hover:scale-[1.02] transition-transform"
+            />
+          </Link>
+          {refreshing && (
+            <span className="text-xs text-stone-400 animate-pulse-soft ml-2">Syncing...</span>
+          )}
         </div>
 
-        <div className="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link to="/" className="flex items-center group">
-              <img
-                src="/logo.png"
-                alt="Recharge Meals"
-                className="h-9 sm:h-10 w-auto rounded-lg bg-white px-2 py-1 group-hover:scale-[1.02] transition-transform"
-              />
-            </Link>
-            {refreshing && (
-              <span className="text-xs text-brand-300/60 animate-pulse-soft ml-2">Syncing...</span>
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-stone-500 hidden sm:block">{customer.email}</p>
+          <div className="w-10 h-10 rounded-full bg-brand-100 border-2 border-brand-200 flex items-center justify-center shrink-0">
+            {customer.first_name?.[0] ? (
+              <span className="text-sm font-bold text-brand-700">
+                {customer.first_name[0]}{customer.last_name?.[0]}
+              </span>
+            ) : (
+              <svg className="w-5 h-5 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+              </svg>
             )}
-          </div>
-
-          <div className="flex items-center gap-3">
-            <p className="text-sm text-brand-200 hidden sm:block">{customer.email}</p>
-            <div className="w-10 h-10 rounded-full bg-brand-500/30 border-2 border-brand-400/40 flex items-center justify-center shrink-0">
-              {customer.first_name?.[0] ? (
-                <span className="text-sm font-bold text-white">
-                  {customer.first_name[0]}{customer.last_name?.[0]}
-                </span>
-              ) : (
-                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-                </svg>
-              )}
-            </div>
           </div>
         </div>
       </div>
-
-      {/* Wave separator */}
-      <svg className="w-full h-4 text-cream -mt-px" viewBox="0 0 1200 30" preserveAspectRatio="none" fill="currentColor">
-        <path d="M0 30V0c200 25 400 25 600 0s400-25 600 0v30z" />
-      </svg>
     </header>
   );
 }

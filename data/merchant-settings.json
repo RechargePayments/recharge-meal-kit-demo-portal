@@ -1,3 +1,4 @@
 {
-  "deliveryDateOffset": 3
+  "deliveryDateOffset": 3,
+  "modificationWindowDays": 2
 }

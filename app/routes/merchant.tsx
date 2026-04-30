@@ -35,6 +35,8 @@ import {
 import {
   getDeliveryDateOffset,
   saveDeliveryDateOffset,
+  getModificationWindowDays,
+  saveModificationWindowDays,
 } from "~/lib/merchant-settings.server";
 import {
   getAddonCollectionIds,
@@ -108,6 +110,7 @@ export async function loader() {
   );
 
   const deliveryDateOffset = getDeliveryDateOffset();
+  const modificationWindowDays = getModificationWindowDays();
   const addonCollectionIds = getAddonCollectionIds();
 
   return json({
@@ -117,6 +120,7 @@ export async function loader() {
     collectionsPerWeek,
     configs,
     deliveryDateOffset,
+    modificationWindowDays,
     addonCollectionIds,
   });
 }
@@ -249,6 +253,19 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ success: true, intent: "save_delivery_offset" as const });
   }
 
+  if (intent === "save_modification_window") {
+    const rawDays = formData.get("modificationWindowDays");
+    if (typeof rawDays !== "string") {
+      return json({ error: "Invalid payload" }, { status: 400 });
+    }
+    const days = parseInt(rawDays, 10);
+    if (isNaN(days) || days < 0 || days > 6) {
+      return json({ error: "Window must be between 0 and 6" }, { status: 400 });
+    }
+    saveModificationWindowDays(days);
+    return json({ success: true, intent: "save_modification_window" as const });
+  }
+
   if (intent === "save_addon_collections") {
     const rawIds = formData.get("collectionIds");
     if (typeof rawIds !== "string") {
@@ -265,7 +282,7 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MerchantPage() {
-  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs, deliveryDateOffset, addonCollectionIds } =
+  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs, deliveryDateOffset, modificationWindowDays, addonCollectionIds } =
     useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
   const [activeView, setActiveView] = useState<ViewMode>("assign");
@@ -301,6 +318,7 @@ export default function MerchantPage() {
         </div>
 
         <DeliveryOffsetPanel savedOffset={deliveryDateOffset} />
+        <ModificationWindowPanel savedDays={modificationWindowDays} />
 
         {/* View navigation */}
         <div className="flex border-b border-gray-200">
@@ -449,6 +467,82 @@ function DeliveryOffsetPanel({ savedOffset }: { savedOffset: number }) {
             {[1, 2, 3, 4, 5, 6].map((n) => (
               <option key={n} value={n}>
                 {n} day{n !== 1 ? "s" : ""}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={handleSave}
+            disabled={isSaving || !hasChanges}
+            className="text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isSaving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Modification window panel ────────────────────────────────────────────────
+
+function ModificationWindowPanel({ savedDays }: { savedDays: number }) {
+  const fetcher = useFetcher<typeof action>();
+  const [days, setDays] = useState(savedDays);
+
+  const isSaving = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "save_modification_window" }
+    | { error: string }
+    | undefined;
+  const savedOk = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+  const hasChanges = days !== savedDays;
+
+  useEffect(() => {
+    setDays(savedDays);
+  }, [savedDays]);
+
+  const handleSave = () => {
+    fetcher.submit(
+      { intent: "save_modification_window", modificationWindowDays: String(days) },
+      { method: "post" }
+    );
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-4 flex items-center justify-between gap-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-indigo-500 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <h2 className="font-semibold text-gray-900">Modification Window</h2>
+          </div>
+          <p className="text-sm text-gray-400 mt-0.5">
+            Days before delivery that customer modifications are locked. Once inside this window, customers cannot edit their bundle, skip, or add/remove add-ons.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 flex-none">
+          {savedOk && !hasChanges && (
+            <span className="text-green-600 text-xs font-medium flex items-center gap-1">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              Saved
+            </span>
+          )}
+
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="text-sm font-semibold text-gray-900 bg-gray-100 border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          >
+            <option value={0}>Off (always editable)</option>
+            {[1, 2, 3, 4, 5, 6].map((n) => (
+              <option key={n} value={n}>
+                {n} day{n !== 1 ? "s" : ""} before delivery
               </option>
             ))}
           </select>

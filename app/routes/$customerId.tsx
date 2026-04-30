@@ -25,7 +25,7 @@ import {
 } from "~/lib/shopify.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
-import { getDeliveryDateOffset } from "~/lib/merchant-settings.server";
+import { getDeliveryDateOffset, getModificationWindowDays, isChargeLocked } from "~/lib/merchant-settings.server";
 import { getAddonCollectionIds } from "~/lib/addon-collections.server";
 import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
@@ -45,6 +45,7 @@ type ChargeTabInfo = {
   scheduledAt: string;
   totalPrice: string;
   hasBundles: boolean;
+  locked: boolean;
 };
 
 type ActiveChargeBundle = {
@@ -87,6 +88,9 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     listAddresses(customerId),
   ]);
 
+  const deliveryDateOffset = getDeliveryDateOffset();
+  const modificationWindowDays = getModificationWindowDays();
+
   // Phase 2: Check which charges have bundles (Recharge API only)
   const chargesBundleCheck = await Promise.all(
     queuedCharges.map(async (charge) => ({
@@ -100,6 +104,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     scheduledAt: cb.charge.scheduled_at,
     totalPrice: cb.charge.total_price,
     hasBundles: cb.bundleSelections.length > 0,
+    locked: isChargeLocked(cb.charge.scheduled_at, deliveryDateOffset, modificationWindowDays),
   }));
 
   const chargesWithBundles = chargesBundleCheck.filter((cb) => cb.bundleSelections.length > 0);
@@ -152,8 +157,6 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     };
   }
 
-  const deliveryDateOffset = getDeliveryDateOffset();
-
   // Fetch add-on products from merchant-configured collections
   let addonProducts: AddonProduct[] = [];
   const addonCollectionIds = getAddonCollectionIds();
@@ -184,7 +187,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? activeBundle.charge.line_items.filter((li) => li.purchase_item_type === "onetime")
     : [];
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons, addresses });
+  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, modificationWindowDays, creditSummary, addonProducts, activeAddons, addresses });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -193,11 +196,23 @@ export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
 
+  const LOCKED_ERROR = "This delivery is past the modification window and can no longer be changed.";
+
+  function checkLockByScheduledAt(scheduledAt: string): boolean {
+    const offset = getDeliveryDateOffset();
+    const window = getModificationWindowDays();
+    return isChargeLocked(scheduledAt, offset, window);
+  }
+
   if (intent === "update_bundle") {
     const rawId = formData.get("bundleSelectionId");
     const rawItems = formData.get("items");
+    const scheduledAt = formData.get("scheduledAt");
     if (typeof rawId !== "string" || typeof rawItems !== "string") {
       return json({ error: "Invalid payload" }, { status: 400 });
+    }
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+      return json({ error: LOCKED_ERROR, intent: "update_bundle" as const }, { status: 403 });
     }
     const items = JSON.parse(rawItems) as Array<
       Pick<BundleSelectionItem, "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity">
@@ -247,9 +262,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (intent === "skip") {
     const chargeId = formData.get("chargeId");
+    const scheduledAt = formData.get("scheduledAt");
     const rawPurchaseItemId = formData.get("purchaseItemId");
     if (typeof chargeId !== "string") {
       return json({ error: "Missing chargeId" }, { status: 400 });
+    }
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+      return json({ error: LOCKED_ERROR, intent: "skip" as const }, { status: 403 });
     }
     const purchaseItemIds =
       typeof rawPurchaseItemId === "string" && rawPurchaseItemId
@@ -277,6 +296,10 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: "Missing required fields", intent: "add_addon" as const }, { status: 400 });
     }
 
+    if (checkLockByScheduledAt(scheduledAt)) {
+      return json({ error: LOCKED_ERROR, intent: "add_addon" as const }, { status: 403 });
+    }
+
     const quantity = rawQty ? Number(rawQty) : 1;
 
     try {
@@ -297,8 +320,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (intent === "remove_addon") {
     const onetimeId = formData.get("onetimeId");
+    const scheduledAt = formData.get("scheduledAt");
     if (typeof onetimeId !== "string") {
       return json({ error: "Missing onetimeId", intent: "remove_addon" as const }, { status: 400 });
+    }
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+      return json({ error: LOCKED_ERROR, intent: "remove_addon" as const }, { status: 403 });
     }
     try {
       await deleteOnetime(Number(onetimeId));
@@ -342,7 +369,7 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, creditSummary, addonProducts, activeAddons, addresses } =
+  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, modificationWindowDays, creditSummary, addonProducts, activeAddons, addresses } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -359,6 +386,7 @@ export default function Dashboard() {
     ? Math.max(0, tabsWithBundles.findIndex((t) => String(t.chargeId) === selectedWeek))
     : 0;
 
+  const activeTabLocked = tabsWithBundles[activeIndex]?.locked ?? false;
   const isLoadingTab = navigation.state === "loading";
 
   return (
@@ -393,6 +421,14 @@ export default function Dashboard() {
               <LoadingGrid />
             ) : activeBundle ? (
               <div key={activeBundle.charge.id} className={`animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
+                {activeTabLocked && (
+                  <LockedBanner
+                    scheduledAt={activeBundle.charge.scheduled_at}
+                    deliveryDateOffset={deliveryDateOffset}
+                    modificationWindowDays={modificationWindowDays}
+                  />
+                )}
+
                 {activeBundle.bundleSelections.map((bs) => (
                   <MealGrid
                     key={bs.id}
@@ -404,11 +440,12 @@ export default function Dashboard() {
                     preferences={customerPreferences}
                     eligibleCollectionIds={activeBundle.eligibleCollectionIds}
                     deliveryDateOffset={deliveryDateOffset}
+                    locked={activeTabLocked}
                   />
                 ))}
 
                 {activeAddons.length > 0 && (
-                  <AddedAddOns items={activeAddons} addonProducts={addonProducts} />
+                  <AddedAddOns items={activeAddons} addonProducts={addonProducts} locked={activeTabLocked} scheduledAt={activeBundle.charge.scheduled_at} />
                 )}
 
                 {addonProducts.length > 0 && (
@@ -416,13 +453,14 @@ export default function Dashboard() {
                     products={addonProducts}
                     addressId={activeBundle.charge.address_id ?? 0}
                     scheduledAt={activeBundle.charge.scheduled_at}
+                    locked={activeTabLocked}
                   />
                 )}
               </div>
             ) : null}
           </section>
         ) : queuedCharges.length > 0 ? (
-          <ChargesListSimple charges={queuedCharges} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} />
+          <ChargesListSimple charges={queuedCharges} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} modificationWindowDays={modificationWindowDays} />
         ) : (
           <EmptyState />
         )}
@@ -1020,6 +1058,40 @@ function DashboardInfoBar({
   );
 }
 
+// ─── Locked banner ────────────────────────────────────────────────────────────
+
+function LockedBanner({
+  scheduledAt,
+  deliveryDateOffset,
+  modificationWindowDays,
+}: {
+  scheduledAt: string;
+  deliveryDateOffset: number;
+  modificationWindowDays: number;
+}) {
+  const delivery = new Date(scheduledAt.slice(0, 10) + "T00:00:00Z");
+  delivery.setUTCDate(delivery.getUTCDate() + deliveryDateOffset);
+  const cutoff = new Date(delivery);
+  cutoff.setUTCDate(cutoff.getUTCDate() - modificationWindowDays);
+  const cutoffStr = cutoff.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+  return (
+    <div className="card border-amber-200 bg-amber-50 px-5 py-4 flex items-start gap-3 mb-5 animate-slide-up">
+      <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center flex-none">
+        <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+        </svg>
+      </div>
+      <div className="flex-1">
+        <p className="text-sm font-semibold text-amber-800">Changes are no longer available for this delivery</p>
+        <p className="text-sm text-amber-700 mt-0.5">
+          The modification window closed on {cutoffStr}. Your selections below are final.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── Week tabs ────────────────────────────────────────────────────────────────
 
 function addDaysToDate(dateStr: string, days: number): string {
@@ -1046,7 +1118,7 @@ function WeekTabs({
 }) {
   return (
     <div className="mb-6">
-      <h2 className="font-display text-xl font-bold text-stone-900 mb-4">Choose Your Meals</h2>
+      <h2 className="font-display text-xl font-bold text-stone-900 mb-4">Your Meals</h2>
       <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
         {tabs.map((tab, i) => {
           const isActive = i === activeIndex;
@@ -1062,7 +1134,14 @@ function WeekTabs({
               }`}
               style={isActive ? { backgroundColor: "#16a34a", borderColor: "#16a34a", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" } : undefined}
             >
-              <p className="font-semibold">Delivery {formatWeekLabel(deliveryDate)}</p>
+              <p className="font-semibold flex items-center gap-1.5">
+                {tab.locked && (
+                  <svg className="w-3.5 h-3.5 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                )}
+                Delivery {formatWeekLabel(deliveryDate)}
+              </p>
               <p className={`text-xs mt-0.5 ${isActive ? "text-green-200" : "text-stone-400"}`}>
                 {formatCurrency(tab.totalPrice)} · Charged {formatWeekLabel(tab.scheduledAt)}
               </p>
@@ -1167,6 +1246,7 @@ function MealGrid({
   preferences,
   eligibleCollectionIds,
   deliveryDateOffset,
+  locked = false,
 }: {
   charge: Charge;
   bundleSelection: BundleSelection;
@@ -1176,6 +1256,7 @@ function MealGrid({
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
   deliveryDateOffset: number;
+  locked?: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
   const skipFetcher = useFetcher();
@@ -1245,6 +1326,7 @@ function MealGrid({
         intent: "update_bundle",
         bundleSelectionId: String(bundleSelection.id),
         items: JSON.stringify(payload),
+        scheduledAt: charge.scheduled_at,
       },
       { method: "post" }
     );
@@ -1380,8 +1462,8 @@ function MealGrid({
                   <p className="text-xs text-stone-400 line-clamp-1">{item.variantTitle}</p>
                 )}
 
-                {/* Stepper */}
-                {chargeIsQueued ? (
+                {/* Stepper / quantity display */}
+                {chargeIsQueued && !locked ? (
                   <div className="flex items-center justify-center gap-3 mt-3">
                     <button
                       onClick={() => adjustQty(index, -1)}
@@ -1425,13 +1507,14 @@ function MealGrid({
       </div>
 
       {/* Sticky footer */}
-      {chargeIsQueued && (
+      {chargeIsQueued && !locked && (
         <div className="sticky bottom-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
           <div className="card rounded-b-none border-b-0 border-x-0 sm:border-x px-5 py-4 flex items-center justify-between gap-4 backdrop-blur-sm bg-white/95">
             <div className="flex items-center gap-4">
               <skipFetcher.Form method="post">
                 <input type="hidden" name="intent" value="skip" />
                 <input type="hidden" name="chargeId" value={String(charge.id)} />
+                <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
                 {bundleSelection.purchase_item_id && (
                   <input type="hidden" name="purchaseItemId" value={String(bundleSelection.purchase_item_id)} />
                 )}
@@ -1484,7 +1567,7 @@ function MealGrid({
 
 // ─── Added add-ons (onetime line items) ───────────────────────────────────────
 
-function AddedAddOns({ items, addonProducts }: { items: ChargeLineItem[]; addonProducts: AddonProduct[] }) {
+function AddedAddOns({ items, addonProducts, locked = false, scheduledAt }: { items: ChargeLineItem[]; addonProducts: AddonProduct[]; locked?: boolean; scheduledAt: string }) {
   if (items.length === 0) return null;
 
   const imageByVariantId = Object.fromEntries(
@@ -1507,14 +1590,14 @@ function AddedAddOns({ items, addonProducts }: { items: ChargeLineItem[]; addonP
 
       <div className="card divide-y divide-stone-100 overflow-hidden">
         {items.map((item) => (
-          <AddedAddonRow key={item.purchase_item_id} item={item} imageByVariantId={imageByVariantId} />
+          <AddedAddonRow key={item.purchase_item_id} item={item} imageByVariantId={imageByVariantId} locked={locked} scheduledAt={scheduledAt} />
         ))}
       </div>
     </div>
   );
 }
 
-function AddedAddonRow({ item, imageByVariantId }: { item: ChargeLineItem; imageByVariantId: Record<string, string | null> }) {
+function AddedAddonRow({ item, imageByVariantId, locked = false, scheduledAt }: { item: ChargeLineItem; imageByVariantId: Record<string, string | null>; locked?: boolean; scheduledAt: string }) {
   const fetcher = useFetcher<typeof action>();
   const isRemoving = fetcher.state !== "idle";
   const fetcherData = fetcher.data as
@@ -1528,7 +1611,7 @@ function AddedAddonRow({ item, imageByVariantId }: { item: ChargeLineItem; image
 
   const handleRemove = () => {
     fetcher.submit(
-      { intent: "remove_addon", onetimeId: String(item.purchase_item_id) },
+      { intent: "remove_addon", onetimeId: String(item.purchase_item_id), scheduledAt },
       { method: "post" }
     );
   };
@@ -1572,23 +1655,25 @@ function AddedAddonRow({ item, imageByVariantId }: { item: ChargeLineItem; image
         <span className="text-sm font-bold text-stone-900">{formatCurrency(item.total_price)}</span>
       </div>
 
-      <button
-        onClick={handleRemove}
-        disabled={isRemoving}
-        className="flex-none w-8 h-8 rounded-lg flex items-center justify-center text-stone-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
-        title="Remove add-on"
-      >
-        {isRemoving ? (
-          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-        ) : (
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        )}
-      </button>
+      {!locked && (
+        <button
+          onClick={handleRemove}
+          disabled={isRemoving}
+          className="flex-none w-8 h-8 rounded-lg flex items-center justify-center text-stone-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
+          title="Remove add-on"
+        >
+          {isRemoving ? (
+            <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -1599,10 +1684,12 @@ function AddOnsCarousel({
   products,
   addressId,
   scheduledAt,
+  locked = false,
 }: {
   products: AddonProduct[];
   addressId: number;
   scheduledAt: string;
+  locked?: boolean;
 }) {
   if (products.length === 0) return null;
 
@@ -1624,6 +1711,7 @@ function AddOnsCarousel({
             product={product}
             addressId={addressId}
             scheduledAt={scheduledAt}
+            locked={locked}
           />
         ))}
       </div>
@@ -1635,10 +1723,12 @@ function AddOnCard({
   product,
   addressId,
   scheduledAt,
+  locked = false,
 }: {
   product: AddonProduct;
   addressId: number;
   scheduledAt: string;
+  locked?: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
   const isAdding = fetcher.state !== "idle";
@@ -1696,7 +1786,9 @@ function AddOnCard({
         </p>
 
         <div className="mt-auto pt-2">
-        {wasAdded ? (
+        {locked ? (
+          <p className="py-2 text-xs text-stone-400 font-medium">Unavailable</p>
+        ) : wasAdded ? (
           <div className="flex items-center justify-center gap-1 py-2">
             <svg className="w-4 h-4 animate-check-pop" style={{ color: "#22c55e" }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
@@ -1746,22 +1838,36 @@ function AddOnCard({
 
 // ─── Simple charge list (for charges without bundles) ─────────────────────────
 
-function ChargesListSimple({ charges, subscriptions, deliveryDateOffset }: { charges: Charge[]; subscriptions: Subscription[]; deliveryDateOffset: number }) {
+function ChargesListSimple({ charges, subscriptions, deliveryDateOffset, modificationWindowDays }: { charges: Charge[]; subscriptions: Subscription[]; deliveryDateOffset: number; modificationWindowDays: number }) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-stone-100">
         <h2 className="font-display font-semibold text-stone-900">Upcoming Deliveries</h2>
       </div>
       <div className="divide-y divide-stone-100">
-        {charges.map((charge) => (
-          <SimpleChargeRow key={charge.id} charge={charge} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} />
-        ))}
+        {charges.map((charge) => {
+          const chargeLocked = isChargeLockedClient(charge.scheduled_at, deliveryDateOffset, modificationWindowDays);
+          return (
+            <SimpleChargeRow key={charge.id} charge={charge} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} locked={chargeLocked} />
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset }: { charge: Charge; subscriptions: Subscription[]; deliveryDateOffset: number }) {
+function isChargeLockedClient(scheduledAt: string, deliveryDateOffset: number, modificationWindowDays: number): boolean {
+  if (modificationWindowDays <= 0) return false;
+  const delivery = new Date(scheduledAt.slice(0, 10) + "T00:00:00Z");
+  delivery.setUTCDate(delivery.getUTCDate() + deliveryDateOffset);
+  const cutoff = new Date(delivery);
+  cutoff.setUTCDate(cutoff.getUTCDate() - modificationWindowDays);
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  return today >= cutoff;
+}
+
+function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset, locked = false }: { charge: Charge; subscriptions: Subscription[]; deliveryDateOffset: number; locked?: boolean }) {
   const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
   const wasSkipped =
@@ -1793,14 +1899,18 @@ function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset }: { charge
       </div>
       <p className="text-sm font-bold text-stone-800 flex-none">{formatCurrency(charge.total_price)}</p>
       <ChargeBadge status={displayStatus} />
-      {isQueued && (
+      {isQueued && !locked && (
         <fetcher.Form method="post">
           <input type="hidden" name="intent" value="skip" />
           <input type="hidden" name="chargeId" value={String(charge.id)} />
+          <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
           <button type="submit" disabled={isSubmitting} className="btn-danger-ghost text-xs whitespace-nowrap">
             {isSubmitting ? "Skipping..." : "Skip"}
           </button>
         </fetcher.Form>
+      )}
+      {isQueued && locked && (
+        <span className="badge flex-none bg-amber-50 text-amber-700">Locked</span>
       )}
     </div>
   );

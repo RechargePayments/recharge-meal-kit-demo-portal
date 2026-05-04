@@ -10,6 +10,7 @@ import {
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
   getBundleSelections,
+  listBundleSelectionsByPurchaseItemIds,
   getSubscription,
   listAddresses,
   listQueuedCharges,
@@ -92,12 +93,49 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const modificationWindowDays = getModificationWindowDays();
 
   // Phase 2: Check which charges have bundles (Recharge API only)
-  const chargesBundleCheck = await Promise.all(
-    queuedCharges.map(async (charge) => ({
-      charge,
-      bundleSelections: await getBundleSelections(charge.id),
-    }))
-  );
+  const subscriptionPurchaseItemIds = [
+    ...new Set(
+      queuedCharges.flatMap((charge) =>
+        charge.line_items
+          .filter((lineItem) => lineItem.purchase_item_type === "subscription")
+          .map((lineItem) => lineItem.purchase_item_id)
+      )
+    ),
+  ];
+
+  let chargesBundleCheck: Array<{ charge: Charge; bundleSelections: BundleSelection[] }>;
+
+  if (subscriptionPurchaseItemIds.length === 0) {
+    chargesBundleCheck = queuedCharges.map((charge) => ({ charge, bundleSelections: [] }));
+  } else {
+    try {
+      const allBundleSelections = await listBundleSelectionsByPurchaseItemIds(subscriptionPurchaseItemIds);
+      const bundleSelectionsByCharge = new Map<number, BundleSelection[]>();
+
+      for (const selection of allBundleSelections) {
+        const { charge_id, ...bundleSelection } = selection;
+        const existing = bundleSelectionsByCharge.get(charge_id);
+        if (existing) {
+          existing.push(bundleSelection);
+        } else {
+          bundleSelectionsByCharge.set(charge_id, [bundleSelection]);
+        }
+      }
+
+      chargesBundleCheck = queuedCharges.map((charge) => ({
+        charge,
+        bundleSelections: bundleSelectionsByCharge.get(charge.id) ?? [],
+      }));
+    } catch {
+      // Fallback for stores where purchase_item_ids is unavailable.
+      chargesBundleCheck = await Promise.all(
+        queuedCharges.map(async (charge) => ({
+          charge,
+          bundleSelections: await getBundleSelections(charge.id),
+        }))
+      );
+    }
+  }
 
   const chargeTabs: ChargeTabInfo[] = chargesBundleCheck.map((cb) => ({
     chargeId: cb.charge.id,
@@ -313,7 +351,31 @@ export async function action({ request }: ActionFunctionArgs) {
       });
       return json({ success: true, intent: "add_addon" as const });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to add add-on.";
+      const raw = err instanceof Error ? err.message : "Failed to add add-on.";
+      let message = "Failed to add add-on.";
+      const jsonStart = raw.indexOf("{");
+      if (jsonStart !== -1) {
+        try {
+          const parsed = JSON.parse(raw.slice(jsonStart)) as {
+            errors?: { general?: string };
+            error?: string;
+          };
+          if (typeof parsed.errors?.general === "string" && parsed.errors.general.trim()) {
+            message = parsed.errors.general;
+          } else if (typeof parsed.error === "string" && parsed.error.trim()) {
+            message = parsed.error;
+          }
+        } catch {
+          message = raw;
+        }
+      } else {
+        message = raw;
+      }
+
+      if (/must remove\/fix existing error charges first/i.test(message)) {
+        message =
+          "This customer has one or more failed charges. Fix or remove those failed charges in Recharge admin, then try adding this add-on again.";
+      }
       return json({ error: message, intent: "add_addon" as const });
     }
   }

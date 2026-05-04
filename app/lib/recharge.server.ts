@@ -179,6 +179,22 @@ export async function getBundleSelections(chargeId: number): Promise<BundleSelec
   return z.array(BundleSelectionSchema).parse(data.bundle_selections);
 }
 
+const BundleSelectionWithChargeIdSchema = BundleSelectionSchema.extend({
+  charge_id: z.number(),
+});
+
+export async function listBundleSelectionsByPurchaseItemIds(
+  purchaseItemIds: number[]
+): Promise<Array<BundleSelection & { charge_id: number }>> {
+  const uniqueIds = [...new Set(purchaseItemIds)];
+  if (uniqueIds.length === 0) return [];
+
+  const data = await api<{ bundle_selections: unknown[] }>(
+    `/bundle_selections?purchase_item_ids=${uniqueIds.join(",")}&limit=250`
+  );
+  return z.array(BundleSelectionWithChargeIdSchema).parse(data.bundle_selections);
+}
+
 export async function getBundleCollectionsFromShopify(
   collectionIds: string[],
   { sorted = false }: { sorted?: boolean } = {}

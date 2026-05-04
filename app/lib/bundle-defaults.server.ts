@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { BundleItemPayload } from "./types";
+import { LEGACY_BUNDLE_VARIANT_ID } from "./bundle-config";
 
 const STORE_PATH = join(process.cwd(), "data", "bundle-defaults.json");
 
@@ -8,15 +9,74 @@ export const MEALS_PER_WEEK = 5;
 
 export type WeeklyConfig = { targetQuantity: number };
 
-type Store = {
+type BundleDefaults = {
   weeklyConfig?: Record<string, WeeklyConfig>;
   weeklyDefaults?: Record<string, BundleItemPayload[]>;
 };
 
+type Store = Record<string, BundleDefaults>;
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isLegacyStoreShape(raw: unknown): raw is BundleDefaults {
+  return isObject(raw) && ("weeklyConfig" in raw || "weeklyDefaults" in raw);
+}
+
+function normalizeBundleDefaults(raw: unknown): BundleDefaults {
+  if (!isObject(raw)) return {};
+  const normalized: BundleDefaults = {};
+
+  if (isObject(raw.weeklyConfig)) {
+    normalized.weeklyConfig = Object.fromEntries(
+      Object.entries(raw.weeklyConfig)
+        .flatMap(([weekStart, value]) => {
+          if (weekStart.length === 0 || !isObject(value)) return [];
+          const targetQuantity =
+            typeof value.targetQuantity === "number" && value.targetQuantity > 0
+              ? Math.round(value.targetQuantity)
+              : MEALS_PER_WEEK;
+          return [[weekStart, { targetQuantity }] as const];
+        })
+    );
+  }
+
+  if (isObject(raw.weeklyDefaults)) {
+    normalized.weeklyDefaults = Object.fromEntries(
+      Object.entries(raw.weeklyDefaults)
+        .filter(([weekStart, value]) => weekStart.length > 0 && Array.isArray(value))
+        .map(([weekStart, value]) => [weekStart, value as BundleItemPayload[]])
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeStore(raw: unknown): Store {
+  if (!isObject(raw)) return {};
+
+  if (isLegacyStoreShape(raw)) {
+    return {
+      [LEGACY_BUNDLE_VARIANT_ID]: normalizeBundleDefaults(raw),
+    };
+  }
+
+  const normalized: Store = {};
+  for (const [variantId, value] of Object.entries(raw)) {
+    if (!variantId) continue;
+    normalized[variantId] = normalizeBundleDefaults(value);
+  }
+  return normalized;
+}
+
 function readStore(): Store {
   if (!existsSync(STORE_PATH)) return {};
   try {
-    return JSON.parse(readFileSync(STORE_PATH, "utf-8")) as Store;
+    const raw = JSON.parse(readFileSync(STORE_PATH, "utf-8")) as unknown;
+    const normalized = normalizeStore(raw);
+    if (isLegacyStoreShape(raw)) writeStore(normalized);
+    return normalized;
   } catch {
     return {};
   }
@@ -28,32 +88,50 @@ function writeStore(store: Store): void {
   writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
 }
 
-export function getWeeklyConfig(weekStart: string): WeeklyConfig {
-  const store = readStore();
-  return store.weeklyConfig?.[weekStart] ?? { targetQuantity: MEALS_PER_WEEK };
+function getBundleDefaults(store: Store, bundleVariantId: string): BundleDefaults {
+  return store[bundleVariantId] ?? {};
 }
 
-export function getAllWeeklyConfigs(): Record<string, WeeklyConfig> {
-  return readStore().weeklyConfig ?? {};
+export function getWeeklyConfig(bundleVariantId: string, weekStart: string): WeeklyConfig {
+  const store = readStore();
+  return getBundleDefaults(store, bundleVariantId).weeklyConfig?.[weekStart] ?? {
+    targetQuantity: MEALS_PER_WEEK,
+  };
 }
 
-export function saveWeeklyConfig(weekStart: string, config: WeeklyConfig): void {
+export function getAllWeeklyConfigs(bundleVariantId: string): Record<string, WeeklyConfig> {
   const store = readStore();
-  if (!store.weeklyConfig) store.weeklyConfig = {};
-  store.weeklyConfig[weekStart] = config;
+  return getBundleDefaults(store, bundleVariantId).weeklyConfig ?? {};
+}
+
+export function saveWeeklyConfig(
+  bundleVariantId: string,
+  weekStart: string,
+  config: WeeklyConfig
+): void {
+  const store = readStore();
+  if (!store[bundleVariantId]) store[bundleVariantId] = {};
+  if (!store[bundleVariantId].weeklyConfig) store[bundleVariantId].weeklyConfig = {};
+  store[bundleVariantId].weeklyConfig![weekStart] = config;
   writeStore(store);
 }
 
 /** @deprecated Kept for backward compatibility with old store format */
-export function getWeeklyDefaults(): Record<string, BundleItemPayload[]> {
-  return readStore().weeklyDefaults ?? {};
+export function getWeeklyDefaults(bundleVariantId: string): Record<string, BundleItemPayload[]> {
+  const store = readStore();
+  return getBundleDefaults(store, bundleVariantId).weeklyDefaults ?? {};
 }
 
 /** @deprecated Kept for backward compatibility with old store format */
-export function saveWeeklyDefault(weekStart: string, selections: BundleItemPayload[]): void {
+export function saveWeeklyDefault(
+  bundleVariantId: string,
+  weekStart: string,
+  selections: BundleItemPayload[]
+): void {
   const store = readStore();
-  if (!store.weeklyDefaults) store.weeklyDefaults = {};
-  store.weeklyDefaults[weekStart] = selections;
+  if (!store[bundleVariantId]) store[bundleVariantId] = {};
+  if (!store[bundleVariantId].weeklyDefaults) store[bundleVariantId].weeklyDefaults = {};
+  store[bundleVariantId].weeklyDefaults![weekStart] = selections;
   writeStore(store);
 }
 

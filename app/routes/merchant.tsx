@@ -1,6 +1,6 @@
-import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
+import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { Link, useFetcher, useLoaderData } from "@remix-run/react";
+import { Link, useFetcher, useLoaderData, useLocation, useNavigate } from "@remix-run/react";
 import { useEffect, useState } from "react";
 import {
   getAllWeeklyConfigs,
@@ -19,6 +19,7 @@ import {
   createBundleSelection,
   getBundleCollectionsFromShopify,
   getBundleSelections,
+  listBundleProducts,
   listBundleSubscriptionIds,
   listQueuedChargesForWeek,
   updateBundleSelection,
@@ -34,14 +35,17 @@ import {
 } from "~/lib/week-assignments.server";
 import {
   getDeliveryDateOffset,
+  getActiveBundleVariantId,
   saveDeliveryDateOffset,
   getModificationWindowDays,
   saveModificationWindowDays,
+  setActiveBundleVariantId,
 } from "~/lib/merchant-settings.server";
 import {
   getAddonCollectionIds,
   saveAddonCollectionIds,
 } from "~/lib/addon-collections.server";
+import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW } from "~/lib/bundle-config";
 import type { BundleCollection } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
@@ -55,16 +59,56 @@ type ApplyChargeResult = {
 
 type ViewMode = "assign" | "sort-order" | "addons";
 
+type BundleVariantOption = {
+  bundleProductId: number;
+  bundleProductTitle: string;
+  externalProductId: string;
+  variantId: number;
+  externalVariantId: string;
+  variantTitle: string;
+};
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
-export async function loader() {
+export async function loader({ request }: LoaderFunctionArgs) {
+  const url = new URL(request.url);
+  const requestedBundleVariantId = url.searchParams.get("bundle");
   const weekStarts = getUpcomingWeekStarts();
 
-  const [collectionsWithAvailability, configs, allAssignments] = await Promise.all([
+  const [collectionsWithAvailability, bundleProducts] = await Promise.all([
     getCollectionsWithAvailability(),
-    Promise.resolve(getAllWeeklyConfigs()),
-    Promise.resolve(getAllWeekAssignments()),
+    listBundleProducts(),
   ]);
+
+  const bundleVariantOptions: BundleVariantOption[] = bundleProducts
+    .filter((bundleProduct) => bundleProduct.is_customizable)
+    .flatMap((bundleProduct) =>
+      bundleProduct.variants.map((variant) => ({
+        bundleProductId: bundleProduct.id,
+        bundleProductTitle: bundleProduct.title,
+        externalProductId: bundleProduct.external_product_id,
+        variantId: variant.id,
+        externalVariantId: variant.external_variant_id,
+        variantTitle: variant.title,
+      }))
+    );
+
+  const variantOptionIds = new Set(bundleVariantOptions.map((option) => option.externalVariantId));
+  const storedActiveBundleVariantId = getActiveBundleVariantId();
+  const currentBundleVariantId =
+    (requestedBundleVariantId && variantOptionIds.has(requestedBundleVariantId)
+      ? requestedBundleVariantId
+      : null)
+    ?? (storedActiveBundleVariantId && variantOptionIds.has(storedActiveBundleVariantId)
+      ? storedActiveBundleVariantId
+      : null)
+    ?? bundleVariantOptions[0]?.externalVariantId
+    ?? null;
+
+  const configs = currentBundleVariantId ? getAllWeeklyConfigs(currentBundleVariantId) : {};
+  const allAssignments = currentBundleVariantId
+    ? getAllWeekAssignments(currentBundleVariantId)
+    : {};
 
   const allCollections = collectionsWithAvailability.map((c) => ({
     id: String(c.id),
@@ -109,12 +153,21 @@ export async function loader() {
     ])
   );
 
-  const deliveryDateOffset = getDeliveryDateOffset();
-  const modificationWindowDays = getModificationWindowDays();
-  const addonCollectionIds = getAddonCollectionIds();
+  const deliveryDateOffset = currentBundleVariantId
+    ? getDeliveryDateOffset(currentBundleVariantId)
+    : DEFAULT_DELIVERY_OFFSET;
+  const modificationWindowDays = currentBundleVariantId
+    ? getModificationWindowDays(currentBundleVariantId)
+    : DEFAULT_MODIFICATION_WINDOW;
+  const addonCollectionIds = currentBundleVariantId
+    ? getAddonCollectionIds(currentBundleVariantId)
+    : [];
 
   return json({
     weekStarts,
+    bundleVariantOptions,
+    currentBundleVariantId,
+    activeBundleVariantId: storedActiveBundleVariantId,
     allCollections,
     assignedPerWeek,
     collectionsPerWeek,
@@ -130,39 +183,76 @@ export async function loader() {
 export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
+  const rawBundleVariantId = formData.get("bundleVariantId");
+  const bundleVariantId =
+    typeof rawBundleVariantId === "string" ? rawBundleVariantId.trim() : "";
+
+  if (intent === "set_active_bundle") {
+    if (!bundleVariantId) {
+      return json({ error: "Missing bundle variant" }, { status: 400 });
+    }
+
+    const bundleProducts = await listBundleProducts();
+    const dynamicVariantIds = new Set(
+      bundleProducts
+        .filter((bundleProduct) => bundleProduct.is_customizable)
+        .flatMap((bundleProduct) =>
+          bundleProduct.variants.map((variant) => variant.external_variant_id)
+        )
+    );
+
+    if (!dynamicVariantIds.has(bundleVariantId)) {
+      return json({ error: "Invalid bundle variant" }, { status: 400 });
+    }
+
+    setActiveBundleVariantId(bundleVariantId);
+    return json({
+      success: true,
+      intent: "set_active_bundle" as const,
+      bundleVariantId,
+    });
+  }
 
   if (intent === "save_assignments") {
     const weekStart = formData.get("weekStart");
     const rawIds = formData.get("collectionIds");
-    if (typeof weekStart !== "string" || typeof rawIds !== "string") {
+    if (
+      typeof weekStart !== "string" ||
+      typeof rawIds !== "string" ||
+      !bundleVariantId
+    ) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
-    saveWeekAssignments(weekStart, collectionIds);
+    saveWeekAssignments(bundleVariantId, weekStart, collectionIds);
     return json({ success: true, intent: "save_assignments" as const, weekStart });
   }
 
   if (intent === "save_config") {
     const weekStart = formData.get("weekStart");
     const rawQty = formData.get("targetQuantity");
-    if (typeof weekStart !== "string" || typeof rawQty !== "string") {
+    if (
+      typeof weekStart !== "string" ||
+      typeof rawQty !== "string" ||
+      !bundleVariantId
+    ) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const targetQuantity = 5;
-    saveWeeklyConfig(weekStart, { targetQuantity });
+    saveWeeklyConfig(bundleVariantId, weekStart, { targetQuantity });
     return json({ success: true, intent: "save_config" as const, weekStart });
   }
 
   if (intent === "apply_defaults") {
     const weekStart = formData.get("weekStart");
-    if (typeof weekStart !== "string") {
+    if (typeof weekStart !== "string" || !bundleVariantId) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
 
-    const { targetQuantity } = getWeeklyConfig(weekStart);
+    const { targetQuantity } = getWeeklyConfig(bundleVariantId, weekStart);
 
     try {
-      const saved = getWeekAssignments(weekStart);
+      const saved = getWeekAssignments(bundleVariantId, weekStart);
       let collectionIds: string[];
       if (saved) {
         collectionIds = saved;
@@ -175,7 +265,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const [bundleCollections, allPreferences, bundleSubIds, charges] = await Promise.all([
         getBundleCollectionsFromShopify(collectionIds, { sorted: true }),
         Promise.resolve(getAllCustomerPreferences()),
-        listBundleSubscriptionIds(),
+        listBundleSubscriptionIds([bundleVariantId]),
         listQueuedChargesForWeek(weekStart),
       ]);
 
@@ -242,37 +332,37 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (intent === "save_delivery_offset") {
     const rawOffset = formData.get("deliveryDateOffset");
-    if (typeof rawOffset !== "string") {
+    if (typeof rawOffset !== "string" || !bundleVariantId) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const offset = parseInt(rawOffset, 10);
     if (isNaN(offset) || offset < 1 || offset > 6) {
       return json({ error: "Offset must be between 1 and 6" }, { status: 400 });
     }
-    saveDeliveryDateOffset(offset);
+    saveDeliveryDateOffset(bundleVariantId, offset);
     return json({ success: true, intent: "save_delivery_offset" as const });
   }
 
   if (intent === "save_modification_window") {
     const rawDays = formData.get("modificationWindowDays");
-    if (typeof rawDays !== "string") {
+    if (typeof rawDays !== "string" || !bundleVariantId) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const days = parseInt(rawDays, 10);
     if (isNaN(days) || days < 0 || days > 6) {
       return json({ error: "Window must be between 0 and 6" }, { status: 400 });
     }
-    saveModificationWindowDays(days);
+    saveModificationWindowDays(bundleVariantId, days);
     return json({ success: true, intent: "save_modification_window" as const });
   }
 
   if (intent === "save_addon_collections") {
     const rawIds = formData.get("collectionIds");
-    if (typeof rawIds !== "string") {
+    if (typeof rawIds !== "string" || !bundleVariantId) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
-    saveAddonCollectionIds(collectionIds);
+    saveAddonCollectionIds(bundleVariantId, collectionIds);
     return json({ success: true, intent: "save_addon_collections" as const });
   }
 
@@ -282,8 +372,18 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MerchantPage() {
-  const { weekStarts, allCollections, assignedPerWeek, collectionsPerWeek, configs, deliveryDateOffset, modificationWindowDays, addonCollectionIds } =
-    useLoaderData<typeof loader>();
+  const {
+    weekStarts,
+    bundleVariantOptions,
+    currentBundleVariantId,
+    allCollections,
+    assignedPerWeek,
+    collectionsPerWeek,
+    configs,
+    deliveryDateOffset,
+    modificationWindowDays,
+    addonCollectionIds,
+  } = useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
   const [activeView, setActiveView] = useState<ViewMode>("assign");
 
@@ -313,105 +413,217 @@ export default function MerchantPage() {
         <div>
           <h1 className="text-lg font-semibold text-gray-900">Weekly Collection Manager</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Assign collections to upcoming weeks, then review sort order and apply personalized defaults.
+            Pick a bundle, then assign collections and apply personalized defaults for that bundle.
           </p>
         </div>
 
-        <DeliveryOffsetPanel savedOffset={deliveryDateOffset} />
-        <ModificationWindowPanel savedDays={modificationWindowDays} />
+        <BundleSelectionPanel
+          bundleVariantOptions={bundleVariantOptions}
+          currentBundleVariantId={currentBundleVariantId}
+        />
 
-        {/* View navigation */}
-        <div className="flex border-b border-gray-200">
-          <button
-            onClick={() => setActiveView("assign")}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              activeView === "assign"
-                ? "border-indigo-600 text-indigo-600"
-                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
-            }`}
-          >
-            Assign Collections
-          </button>
-          <button
-            onClick={() => setActiveView("sort-order")}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              activeView === "sort-order"
-                ? "border-indigo-600 text-indigo-600"
-                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
-            }`}
-          >
-            Sort Order & Defaults
-          </button>
-          <button
-            onClick={() => setActiveView("addons")}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              activeView === "addons"
-                ? "border-indigo-600 text-indigo-600"
-                : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
-            }`}
-          >
-            Add-On Collections
-          </button>
-        </div>
+        {currentBundleVariantId == null ? (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4">
+            <p className="text-sm text-gray-600">
+              Select a dynamic bundle product above to load bundle-specific settings.
+            </p>
+          </div>
+        ) : (
+          <>
+            <DeliveryOffsetPanel
+              bundleVariantId={currentBundleVariantId}
+              savedOffset={deliveryDateOffset}
+            />
+            <ModificationWindowPanel
+              bundleVariantId={currentBundleVariantId}
+              savedDays={modificationWindowDays}
+            />
 
-        {/* Week tabs (hidden for addons view since collections are global) */}
-        {activeView !== "addons" && (
-          <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
-            {weekStarts.map((week) => (
+            {/* View navigation */}
+            <div className="flex border-b border-gray-200">
               <button
-                key={week}
-                onClick={() => setActiveWeek(week)}
-                className={`flex-1 text-sm font-medium py-1.5 px-2 rounded-lg transition-colors ${
-                  activeWeek === week
-                    ? "bg-white text-gray-900 shadow-sm"
-                    : "text-gray-500 hover:text-gray-800"
+                onClick={() => setActiveView("assign")}
+                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                  activeView === "assign"
+                    ? "border-indigo-600 text-indigo-600"
+                    : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
                 }`}
               >
-                {formatTabLabel(week)}
+                Assign Collections
               </button>
-            ))}
-          </div>
-        )}
+              <button
+                onClick={() => setActiveView("sort-order")}
+                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                  activeView === "sort-order"
+                    ? "border-indigo-600 text-indigo-600"
+                    : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
+                }`}
+              >
+                Sort Order & Defaults
+              </button>
+              <button
+                onClick={() => setActiveView("addons")}
+                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                  activeView === "addons"
+                    ? "border-indigo-600 text-indigo-600"
+                    : "border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300"
+                }`}
+              >
+                Add-On Collections
+              </button>
+            </div>
 
-        {/* Active view content */}
-        {activeView === "assign" &&
-          weekStarts.map((week) =>
-            week === activeWeek ? (
-              <AssignPanel
-                key={week}
-                weekStart={week}
+            {/* Week tabs (hidden for addons view since collections are global) */}
+            {activeView !== "addons" && (
+              <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
+                {weekStarts.map((week) => (
+                  <button
+                    key={week}
+                    onClick={() => setActiveWeek(week)}
+                    className={`flex-1 text-sm font-medium py-1.5 px-2 rounded-lg transition-colors ${
+                      activeWeek === week
+                        ? "bg-white text-gray-900 shadow-sm"
+                        : "text-gray-500 hover:text-gray-800"
+                    }`}
+                  >
+                    {formatTabLabel(week)}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Active view content */}
+            {activeView === "assign" &&
+              weekStarts.map((week) =>
+                week === activeWeek ? (
+                  <AssignPanel
+                    key={week}
+                    bundleVariantId={currentBundleVariantId}
+                    weekStart={week}
+                    allCollections={allCollections}
+                    assignedIds={assignedPerWeek[week] ?? []}
+                  />
+                ) : null
+              )}
+
+            {activeView === "sort-order" &&
+              weekStarts.map((week) =>
+                week === activeWeek ? (
+                  <WeekPanel
+                    key={week}
+                    bundleVariantId={currentBundleVariantId}
+                    weekStart={week}
+                    collections={collectionsPerWeek[week] ?? []}
+                    savedConfig={configs[week] ?? null}
+                  />
+                ) : null
+              )}
+
+            {activeView === "addons" && (
+              <AddonCollectionsPanel
+                bundleVariantId={currentBundleVariantId}
                 allCollections={allCollections}
-                assignedIds={assignedPerWeek[week] ?? []}
+                savedIds={addonCollectionIds}
               />
-            ) : null
-          )}
-
-        {activeView === "sort-order" &&
-          weekStarts.map((week) =>
-            week === activeWeek ? (
-              <WeekPanel
-                key={week}
-                weekStart={week}
-                collections={collectionsPerWeek[week] ?? []}
-                savedConfig={configs[week] ?? null}
-              />
-            ) : null
-          )}
-
-        {activeView === "addons" && (
-          <AddonCollectionsPanel
-            allCollections={allCollections}
-            savedIds={addonCollectionIds}
-          />
+            )}
+          </>
         )}
       </main>
     </div>
   );
 }
 
+function BundleSelectionPanel({
+  bundleVariantOptions,
+  currentBundleVariantId,
+}: {
+  bundleVariantOptions: BundleVariantOption[];
+  currentBundleVariantId: string | null;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [selectedVariantId, setSelectedVariantId] = useState(currentBundleVariantId ?? "");
+
+  useEffect(() => {
+    setSelectedVariantId(currentBundleVariantId ?? "");
+  }, [currentBundleVariantId]);
+
+  const isSaving = fetcher.state !== "idle";
+
+  const handleChange = (variantId: string) => {
+    setSelectedVariantId(variantId);
+    if (!variantId) return;
+
+    fetcher.submit(
+      { intent: "set_active_bundle", bundleVariantId: variantId },
+      { method: "post" }
+    );
+
+    const params = new URLSearchParams(location.search);
+    params.set("bundle", variantId);
+    navigate(`?${params.toString()}`, { preventScrollReset: true });
+  };
+
+  if (bundleVariantOptions.length === 0) {
+    return (
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4">
+        <h2 className="font-semibold text-gray-900">Bundle Product</h2>
+        <p className="text-sm text-gray-500 mt-1">
+          No dynamic bundle products found. Only dynamic bundles are eligible in this view.
+        </p>
+      </div>
+    );
+  }
+
+  const selectedOption =
+    bundleVariantOptions.find((option) => option.externalVariantId === selectedVariantId) ??
+    null;
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-gray-900">Bundle Product</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Toggle between dynamic bundle products to manage each bundle&apos;s own settings.
+          </p>
+        </div>
+        {isSaving && <span className="text-xs text-gray-400">Saving…</span>}
+      </div>
+
+      <div className="mt-3 flex items-center gap-3">
+        <select
+          value={selectedVariantId}
+          onChange={(e) => handleChange(e.target.value)}
+          className="w-full text-sm font-medium text-gray-900 bg-gray-100 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+        >
+          {bundleVariantOptions.map((option) => (
+            <option key={option.externalVariantId} value={option.externalVariantId}>
+              {option.bundleProductTitle} — {option.variantTitle} ({option.externalVariantId})
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {selectedOption && (
+        <p className="mt-2 text-xs text-gray-500">
+          Active bundle: {selectedOption.bundleProductTitle} ({selectedOption.externalVariantId})
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Delivery offset panel ────────────────────────────────────────────────────
 
-function DeliveryOffsetPanel({ savedOffset }: { savedOffset: number }) {
+function DeliveryOffsetPanel({
+  bundleVariantId,
+  savedOffset,
+}: {
+  bundleVariantId: string;
+  savedOffset: number;
+}) {
   const fetcher = useFetcher<typeof action>();
   const [offset, setOffset] = useState(savedOffset);
 
@@ -429,7 +641,11 @@ function DeliveryOffsetPanel({ savedOffset }: { savedOffset: number }) {
 
   const handleSave = () => {
     fetcher.submit(
-      { intent: "save_delivery_offset", deliveryDateOffset: String(offset) },
+      {
+        intent: "save_delivery_offset",
+        bundleVariantId,
+        deliveryDateOffset: String(offset),
+      },
       { method: "post" }
     );
   };
@@ -486,7 +702,13 @@ function DeliveryOffsetPanel({ savedOffset }: { savedOffset: number }) {
 
 // ─── Modification window panel ────────────────────────────────────────────────
 
-function ModificationWindowPanel({ savedDays }: { savedDays: number }) {
+function ModificationWindowPanel({
+  bundleVariantId,
+  savedDays,
+}: {
+  bundleVariantId: string;
+  savedDays: number;
+}) {
   const fetcher = useFetcher<typeof action>();
   const [days, setDays] = useState(savedDays);
 
@@ -504,7 +726,11 @@ function ModificationWindowPanel({ savedDays }: { savedDays: number }) {
 
   const handleSave = () => {
     fetcher.submit(
-      { intent: "save_modification_window", modificationWindowDays: String(days) },
+      {
+        intent: "save_modification_window",
+        bundleVariantId,
+        modificationWindowDays: String(days),
+      },
       { method: "post" }
     );
   };
@@ -586,10 +812,12 @@ type SimpleCollection = {
 };
 
 function AssignPanel({
+  bundleVariantId,
   weekStart,
   allCollections,
   assignedIds,
 }: {
+  bundleVariantId: string;
   weekStart: string;
   allCollections: SimpleCollection[];
   assignedIds: string[];
@@ -628,6 +856,7 @@ function AssignPanel({
     fetcher.submit(
       {
         intent: "save_assignments",
+        bundleVariantId,
         weekStart,
         collectionIds: [...selected].join(","),
       },
@@ -770,10 +999,12 @@ function getDietaryTags(tags: string[]): string[] {
 }
 
 function WeekPanel({
+  bundleVariantId,
   weekStart,
   collections,
   savedConfig,
 }: {
+  bundleVariantId: string;
   weekStart: string;
   collections: CollectionWithDates[];
   savedConfig: WeeklyConfig | null;
@@ -829,14 +1060,19 @@ function WeekPanel({
 
   const handleSave = () => {
     saveFetcher.submit(
-      { intent: "save_config", weekStart, targetQuantity: String(targetQuantity) },
+      {
+        intent: "save_config",
+        bundleVariantId,
+        weekStart,
+        targetQuantity: String(targetQuantity),
+      },
       { method: "post" }
     );
   };
 
   const handleApply = () => {
     applyFetcher.submit(
-      { intent: "apply_defaults", weekStart },
+      { intent: "apply_defaults", bundleVariantId, weekStart },
       { method: "post" }
     );
   };
@@ -1070,9 +1306,11 @@ function WeekPanel({
 // ─── Add-on collections panel ─────────────────────────────────────────────────
 
 function AddonCollectionsPanel({
+  bundleVariantId,
   allCollections,
   savedIds,
 }: {
+  bundleVariantId: string;
   allCollections: SimpleCollection[];
   savedIds: string[];
 }) {
@@ -1110,6 +1348,7 @@ function AddonCollectionsPanel({
     fetcher.submit(
       {
         intent: "save_addon_collections",
+        bundleVariantId,
         collectionIds: [...selected].join(","),
       },
       { method: "post" }

@@ -26,8 +26,14 @@ import {
 } from "~/lib/shopify.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
-import { getDeliveryDateOffset, getModificationWindowDays, isChargeLocked } from "~/lib/merchant-settings.server";
+import {
+  getActiveBundleVariantId,
+  getDeliveryDateOffset,
+  getModificationWindowDays,
+  isChargeLocked,
+} from "~/lib/merchant-settings.server";
 import { getAddonCollectionIds } from "~/lib/addon-collections.server";
+import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW, LEGACY_BUNDLE_VARIANT_ID } from "~/lib/bundle-config";
 import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
@@ -67,6 +73,13 @@ type AddonProduct = {
   price: string;
 };
 
+type BundleSubscriptionTab = {
+  purchaseItemId: number;
+  productTitle: string;
+  externalVariantId: string | null;
+  chargeIds: number[];
+};
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader({ params, request }: LoaderFunctionArgs) {
@@ -78,6 +91,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   const url = new URL(request.url);
   const selectedWeek = url.searchParams.get("week");
+  const selectedSubscription = url.searchParams.get("subscription");
 
   // Phase 1: Light data — Recharge only, no Shopify calls
   const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary, addresses] = await Promise.all([
@@ -88,9 +102,6 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     getCreditSummary(customerId).catch(() => null),
     listAddresses(customerId),
   ]);
-
-  const deliveryDateOffset = getDeliveryDateOffset();
-  const modificationWindowDays = getModificationWindowDays();
 
   // Phase 2: Check which charges have bundles (Recharge API only)
   const subscriptionPurchaseItemIds = [
@@ -137,7 +148,58 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     }
   }
 
-  const chargeTabs: ChargeTabInfo[] = chargesBundleCheck.map((cb) => ({
+  const subscriptionById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+  const bundleSubscriptionMap = new Map<number, BundleSubscriptionTab>();
+  for (const { charge, bundleSelections } of chargesBundleCheck) {
+    for (const bundleSelection of bundleSelections) {
+      const purchaseItemId = bundleSelection.purchase_item_id;
+      const existing = bundleSubscriptionMap.get(purchaseItemId);
+      if (existing) {
+        if (!existing.chargeIds.includes(charge.id)) existing.chargeIds.push(charge.id);
+        continue;
+      }
+
+      const subscription = subscriptionById.get(purchaseItemId);
+      bundleSubscriptionMap.set(purchaseItemId, {
+        purchaseItemId,
+        productTitle: subscription?.product_title ?? `Subscription #${purchaseItemId}`,
+        externalVariantId: subscription?.external_variant_id?.ecommerce ?? null,
+        chargeIds: [charge.id],
+      });
+    }
+  }
+
+  const bundleSubscriptions = Array.from(bundleSubscriptionMap.values());
+  const requestedSubscriptionId =
+    selectedSubscription != null && /^\d+$/.test(selectedSubscription)
+      ? Number(selectedSubscription)
+      : null;
+  const activeSubscription =
+    (requestedSubscriptionId != null
+      ? bundleSubscriptions.find((tab) => tab.purchaseItemId === requestedSubscriptionId)
+      : null)
+    ?? bundleSubscriptions[0]
+    ?? null;
+
+  const activeBundleVariantId =
+    activeSubscription?.externalVariantId
+    ?? getActiveBundleVariantId()
+    ?? LEGACY_BUNDLE_VARIANT_ID;
+
+  const deliveryDateOffset = activeBundleVariantId
+    ? getDeliveryDateOffset(activeBundleVariantId)
+    : DEFAULT_DELIVERY_OFFSET;
+  const modificationWindowDays = activeBundleVariantId
+    ? getModificationWindowDays(activeBundleVariantId)
+    : DEFAULT_MODIFICATION_WINDOW;
+
+  const chargesForActiveSubscription = activeSubscription
+    ? chargesBundleCheck.filter((cb) =>
+      cb.bundleSelections.some((selection) => selection.purchase_item_id === activeSubscription.purchaseItemId)
+    )
+    : chargesBundleCheck.filter((cb) => cb.bundleSelections.length > 0);
+
+  const chargeTabs: ChargeTabInfo[] = chargesForActiveSubscription.map((cb) => ({
     chargeId: cb.charge.id,
     scheduledAt: cb.charge.scheduled_at,
     totalPrice: cb.charge.total_price,
@@ -145,59 +207,65 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     locked: isChargeLocked(cb.charge.scheduled_at, deliveryDateOffset, modificationWindowDays),
   }));
 
-  const chargesWithBundles = chargesBundleCheck.filter((cb) => cb.bundleSelections.length > 0);
-
   // Phase 3: Load full Shopify data ONLY for the active/selected charge
   const activeEntry = selectedWeek
-    ? chargesWithBundles.find((cb) => String(cb.charge.id) === selectedWeek) ?? chargesWithBundles[0]
-    : chargesWithBundles[0];
+    ? chargesForActiveSubscription.find((cb) => String(cb.charge.id) === selectedWeek) ?? chargesForActiveSubscription[0]
+    : chargesForActiveSubscription[0];
 
   let activeBundle: ActiveChargeBundle | null = null;
 
-  if (activeEntry && activeEntry.bundleSelections.length > 0) {
-    const { charge, bundleSelections } = activeEntry;
+  if (activeEntry && activeSubscription) {
+    const charge = activeEntry.charge;
+    const bundleSelections = activeEntry.bundleSelections.filter(
+      (selection) => selection.purchase_item_id === activeSubscription.purchaseItemId
+    );
 
-    const uniquePurchaseItemIds = [...new Set(bundleSelections.map((bs) => bs.purchase_item_id))];
-    const subs = await Promise.all(uniquePurchaseItemIds.map((id) => getSubscription(id)));
-    const subscriptionTitles = Object.fromEntries(subs.map((s) => [s.id, s.product_title]));
+    if (bundleSelections.length > 0) {
 
-    const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
-    const [bundleProductInfoList, collectionsWithAvailability] = await Promise.all([
-      Promise.all(uniqueProductIds.map(getBundleProductInfo)),
-      getCollectionsWithAvailability(),
-    ]);
+      const uniquePurchaseItemIds = [...new Set(bundleSelections.map((bs) => bs.purchase_item_id))];
+      const subs = await Promise.all(uniquePurchaseItemIds.map((id) => getSubscription(id)));
+      const subscriptionTitles = Object.fromEntries(subs.map((s) => [s.id, s.product_title]));
 
-    const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
-    const collectionIds = [
-      ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
-    ];
+      const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
+      const [bundleProductInfoList, collectionsWithAvailability] = await Promise.all([
+        Promise.all(uniqueProductIds.map(getBundleProductInfo)),
+        getCollectionsWithAvailability(),
+      ]);
 
-    const weekStart = getMondayOf(charge.scheduled_at);
-    const savedAssignments = getWeekAssignments(weekStart);
-    const eligibleCollectionIds = savedAssignments
-      ?? filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id));
+      const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
+      const collectionIds = [
+        ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
+      ];
 
-    const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
-    const collectionsByProductId = Object.fromEntries(
-      uniqueProductIds.map((pid) => [pid, availableCollections])
-    ) as Record<string, typeof availableCollections>;
-    const bundleProductRangesByProductId = Object.fromEntries(
-      uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
-    ) as Record<string, number[][]>;
+      const weekStart = getMondayOf(charge.scheduled_at);
+      const savedAssignments = getWeekAssignments(activeBundleVariantId, weekStart);
+      const eligibleCollectionIds = savedAssignments
+        ?? filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id));
 
-    activeBundle = {
-      charge,
-      bundleSelections,
-      subscriptionTitles,
-      collectionsByProductId,
-      bundleProductRangesByProductId,
-      eligibleCollectionIds: [...new Set(eligibleCollectionIds)],
-    };
+      const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
+      const collectionsByProductId = Object.fromEntries(
+        uniqueProductIds.map((pid) => [pid, availableCollections])
+      ) as Record<string, typeof availableCollections>;
+      const bundleProductRangesByProductId = Object.fromEntries(
+        uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
+      ) as Record<string, number[][]>;
+
+      activeBundle = {
+        charge,
+        bundleSelections,
+        subscriptionTitles,
+        collectionsByProductId,
+        bundleProductRangesByProductId,
+        eligibleCollectionIds: [...new Set(eligibleCollectionIds)],
+      };
+    }
   }
 
   // Fetch add-on products from merchant-configured collections
   let addonProducts: AddonProduct[] = [];
-  const addonCollectionIds = getAddonCollectionIds();
+  const addonCollectionIds = activeBundleVariantId
+    ? getAddonCollectionIds(activeBundleVariantId)
+    : [];
   if (addonCollectionIds.length > 0) {
     const addonCollections = await getBundleCollectionsFromShopify(addonCollectionIds);
     const seen = new Set<string>();
@@ -225,7 +293,23 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? activeBundle.charge.line_items.filter((li) => li.purchase_item_type === "onetime")
     : [];
 
-  return json({ customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, modificationWindowDays, creditSummary, addonProducts, activeAddons, addresses });
+  return json({
+    customer,
+    subscriptions,
+    queuedCharges,
+    bundleSubscriptions,
+    activeSubscriptionId: activeSubscription?.purchaseItemId ?? null,
+    activeBundleVariantId,
+    chargeTabs,
+    activeBundle,
+    customerPreferences,
+    deliveryDateOffset,
+    modificationWindowDays,
+    creditSummary,
+    addonProducts,
+    activeAddons,
+    addresses,
+  });
 }
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -233,12 +317,21 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
+  const rawBundleVariantId = formData.get("bundleVariantId");
+  const bundleVariantId =
+    typeof rawBundleVariantId === "string" && rawBundleVariantId.trim().length > 0
+      ? rawBundleVariantId.trim()
+      : null;
 
   const LOCKED_ERROR = "This delivery is past the modification window and can no longer be changed.";
 
-  function checkLockByScheduledAt(scheduledAt: string): boolean {
-    const offset = getDeliveryDateOffset();
-    const window = getModificationWindowDays();
+  function checkLockByScheduledAt(scheduledAt: string, variantId?: string | null): boolean {
+    const resolvedBundleVariantId =
+      variantId
+      ?? getActiveBundleVariantId()
+      ?? LEGACY_BUNDLE_VARIANT_ID;
+    const offset = getDeliveryDateOffset(resolvedBundleVariantId);
+    const window = getModificationWindowDays(resolvedBundleVariantId);
     return isChargeLocked(scheduledAt, offset, window);
   }
 
@@ -249,7 +342,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (typeof rawId !== "string" || typeof rawItems !== "string") {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
-    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "update_bundle" as const }, { status: 403 });
     }
     const items = JSON.parse(rawItems) as Array<
@@ -305,7 +398,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (typeof chargeId !== "string") {
       return json({ error: "Missing chargeId" }, { status: 400 });
     }
-    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "skip" as const }, { status: 403 });
     }
     const purchaseItemIds =
@@ -334,7 +427,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: "Missing required fields", intent: "add_addon" as const }, { status: 400 });
     }
 
-    if (checkLockByScheduledAt(scheduledAt)) {
+    if (checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "add_addon" as const }, { status: 403 });
     }
 
@@ -386,7 +479,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (typeof onetimeId !== "string") {
       return json({ error: "Missing onetimeId", intent: "remove_addon" as const }, { status: 400 });
     }
-    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt)) {
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "remove_addon" as const }, { status: 403 });
     }
     try {
@@ -431,7 +524,23 @@ export async function action({ request }: ActionFunctionArgs) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { customer, subscriptions, queuedCharges, chargeTabs, activeBundle, customerPreferences, deliveryDateOffset, modificationWindowDays, creditSummary, addonProducts, activeAddons, addresses } =
+  const {
+    customer,
+    subscriptions,
+    queuedCharges,
+    bundleSubscriptions,
+    activeSubscriptionId,
+    activeBundleVariantId,
+    chargeTabs,
+    activeBundle,
+    customerPreferences,
+    deliveryDateOffset,
+    modificationWindowDays,
+    creditSummary,
+    addonProducts,
+    activeAddons,
+    addresses,
+  } =
     useLoaderData<typeof loader>();
   const { revalidate, state } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -468,6 +577,19 @@ export default function Dashboard() {
         {/* Week tabs + Meal grid */}
         {tabsWithBundles.length > 0 ? (
           <section>
+            {bundleSubscriptions.length > 1 && (
+              <SubscriptionTabs
+                subscriptions={bundleSubscriptions}
+                activeSubscriptionId={activeSubscriptionId}
+                onSelect={(purchaseItemId) => {
+                  const params = new URLSearchParams(searchParams);
+                  params.set("subscription", String(purchaseItemId));
+                  params.delete("week");
+                  setSearchParams(params, { preventScrollReset: true });
+                }}
+              />
+            )}
+
             <WeekTabs
               tabs={tabsWithBundles}
               activeIndex={activeIndex}
@@ -502,12 +624,19 @@ export default function Dashboard() {
                     preferences={customerPreferences}
                     eligibleCollectionIds={activeBundle.eligibleCollectionIds}
                     deliveryDateOffset={deliveryDateOffset}
+                    bundleVariantId={activeBundleVariantId}
                     locked={activeTabLocked}
                   />
                 ))}
 
                 {activeAddons.length > 0 && (
-                  <AddedAddOns items={activeAddons} addonProducts={addonProducts} locked={activeTabLocked} scheduledAt={activeBundle.charge.scheduled_at} />
+                  <AddedAddOns
+                    items={activeAddons}
+                    addonProducts={addonProducts}
+                    locked={activeTabLocked}
+                    scheduledAt={activeBundle.charge.scheduled_at}
+                    bundleVariantId={activeBundleVariantId}
+                  />
                 )}
 
                 {addonProducts.length > 0 && (
@@ -515,6 +644,7 @@ export default function Dashboard() {
                     products={addonProducts}
                     addressId={activeBundle.charge.address_id ?? 0}
                     scheduledAt={activeBundle.charge.scheduled_at}
+                    bundleVariantId={activeBundleVariantId}
                     locked={activeTabLocked}
                   />
                 )}
@@ -522,7 +652,13 @@ export default function Dashboard() {
             ) : null}
           </section>
         ) : queuedCharges.length > 0 ? (
-          <ChargesListSimple charges={queuedCharges} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} modificationWindowDays={modificationWindowDays} />
+          <ChargesListSimple
+            charges={queuedCharges}
+            subscriptions={subscriptions}
+            deliveryDateOffset={deliveryDateOffset}
+            modificationWindowDays={modificationWindowDays}
+            bundleVariantId={activeBundleVariantId}
+          />
         ) : (
           <EmptyState />
         )}
@@ -819,17 +955,17 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">First name</label>
-              <input name="first_name" defaultValue={address.first_name} className={fieldClass} />
+              <input name="first_name" defaultValue={address.first_name ?? ""} className={fieldClass} />
             </div>
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">Last name</label>
-              <input name="last_name" defaultValue={address.last_name} className={fieldClass} />
+              <input name="last_name" defaultValue={address.last_name ?? ""} className={fieldClass} />
             </div>
           </div>
 
           <div>
             <label className="block text-xs font-medium text-stone-500 mb-1">Address</label>
-            <input name="address1" defaultValue={address.address1} className={fieldClass} />
+            <input name="address1" defaultValue={address.address1 ?? ""} className={fieldClass} />
           </div>
 
           <div>
@@ -840,22 +976,22 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">City</label>
-              <input name="city" defaultValue={address.city} className={fieldClass} />
+              <input name="city" defaultValue={address.city ?? ""} className={fieldClass} />
             </div>
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">State / Province</label>
-              <input name="province" defaultValue={address.province} className={fieldClass} />
+              <input name="province" defaultValue={address.province ?? ""} className={fieldClass} />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">ZIP / Postal code</label>
-              <input name="zip" defaultValue={address.zip} className={fieldClass} />
+              <input name="zip" defaultValue={address.zip ?? ""} className={fieldClass} />
             </div>
             <div>
               <label className="block text-xs font-medium text-stone-500 mb-1">Country</label>
-              <select name="country_code" defaultValue={address.country_code} className={fieldClass}>
+              <select name="country_code" defaultValue={address.country_code ?? ""} className={fieldClass}>
                 <option value="" disabled>Select country</option>
                 {Object.entries(COUNTRIES).map(([code, name]) => (
                   <option key={code} value={code}>{name}</option>
@@ -1154,6 +1290,40 @@ function LockedBanner({
   );
 }
 
+function SubscriptionTabs({
+  subscriptions,
+  activeSubscriptionId,
+  onSelect,
+}: {
+  subscriptions: BundleSubscriptionTab[];
+  activeSubscriptionId: number | null;
+  onSelect: (purchaseItemId: number) => void;
+}) {
+  return (
+    <div className="mb-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-2">Your Bundles</p>
+      <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+        {subscriptions.map((subscription) => {
+          const isActive = subscription.purchaseItemId === activeSubscriptionId;
+          return (
+            <button
+              key={subscription.purchaseItemId}
+              onClick={() => onSelect(subscription.purchaseItemId)}
+              className={`flex-none rounded-xl px-4 py-2 text-sm font-medium border transition-colors ${
+                isActive
+                  ? "bg-brand-600 text-white border-brand-600"
+                  : "bg-white text-stone-600 border-stone-200 hover:border-brand-300 hover:text-brand-700"
+              }`}
+            >
+              <span className="block">{subscription.productTitle}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Week tabs ────────────────────────────────────────────────────────────────
 
 function addDaysToDate(dateStr: string, days: number): string {
@@ -1308,6 +1478,7 @@ function MealGrid({
   preferences,
   eligibleCollectionIds,
   deliveryDateOffset,
+  bundleVariantId,
   locked = false,
 }: {
   charge: Charge;
@@ -1318,6 +1489,7 @@ function MealGrid({
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
   deliveryDateOffset: number;
+  bundleVariantId: string;
   locked?: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
@@ -1386,6 +1558,7 @@ function MealGrid({
     fetcher.submit(
       {
         intent: "update_bundle",
+        bundleVariantId,
         bundleSelectionId: String(bundleSelection.id),
         items: JSON.stringify(payload),
         scheduledAt: charge.scheduled_at,
@@ -1575,6 +1748,7 @@ function MealGrid({
             <div className="flex items-center gap-4">
               <skipFetcher.Form method="post">
                 <input type="hidden" name="intent" value="skip" />
+                <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
                 <input type="hidden" name="chargeId" value={String(charge.id)} />
                 <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
                 {bundleSelection.purchase_item_id && (
@@ -1629,7 +1803,19 @@ function MealGrid({
 
 // ─── Added add-ons (onetime line items) ───────────────────────────────────────
 
-function AddedAddOns({ items, addonProducts, locked = false, scheduledAt }: { items: ChargeLineItem[]; addonProducts: AddonProduct[]; locked?: boolean; scheduledAt: string }) {
+function AddedAddOns({
+  items,
+  addonProducts,
+  locked = false,
+  scheduledAt,
+  bundleVariantId,
+}: {
+  items: ChargeLineItem[];
+  addonProducts: AddonProduct[];
+  locked?: boolean;
+  scheduledAt: string;
+  bundleVariantId: string;
+}) {
   if (items.length === 0) return null;
 
   const imageByVariantId = Object.fromEntries(
@@ -1652,14 +1838,33 @@ function AddedAddOns({ items, addonProducts, locked = false, scheduledAt }: { it
 
       <div className="card divide-y divide-stone-100 overflow-hidden">
         {items.map((item) => (
-          <AddedAddonRow key={item.purchase_item_id} item={item} imageByVariantId={imageByVariantId} locked={locked} scheduledAt={scheduledAt} />
+          <AddedAddonRow
+            key={item.purchase_item_id}
+            item={item}
+            imageByVariantId={imageByVariantId}
+            locked={locked}
+            scheduledAt={scheduledAt}
+            bundleVariantId={bundleVariantId}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function AddedAddonRow({ item, imageByVariantId, locked = false, scheduledAt }: { item: ChargeLineItem; imageByVariantId: Record<string, string | null>; locked?: boolean; scheduledAt: string }) {
+function AddedAddonRow({
+  item,
+  imageByVariantId,
+  locked = false,
+  scheduledAt,
+  bundleVariantId,
+}: {
+  item: ChargeLineItem;
+  imageByVariantId: Record<string, string | null>;
+  locked?: boolean;
+  scheduledAt: string;
+  bundleVariantId: string;
+}) {
   const fetcher = useFetcher<typeof action>();
   const isRemoving = fetcher.state !== "idle";
   const fetcherData = fetcher.data as
@@ -1673,7 +1878,12 @@ function AddedAddonRow({ item, imageByVariantId, locked = false, scheduledAt }: 
 
   const handleRemove = () => {
     fetcher.submit(
-      { intent: "remove_addon", onetimeId: String(item.purchase_item_id), scheduledAt },
+      {
+        intent: "remove_addon",
+        bundleVariantId,
+        onetimeId: String(item.purchase_item_id),
+        scheduledAt,
+      },
       { method: "post" }
     );
   };
@@ -1746,11 +1956,13 @@ function AddOnsCarousel({
   products,
   addressId,
   scheduledAt,
+  bundleVariantId,
   locked = false,
 }: {
   products: AddonProduct[];
   addressId: number;
   scheduledAt: string;
+  bundleVariantId: string;
   locked?: boolean;
 }) {
   if (products.length === 0) return null;
@@ -1773,6 +1985,7 @@ function AddOnsCarousel({
             product={product}
             addressId={addressId}
             scheduledAt={scheduledAt}
+            bundleVariantId={bundleVariantId}
             locked={locked}
           />
         ))}
@@ -1785,11 +1998,13 @@ function AddOnCard({
   product,
   addressId,
   scheduledAt,
+  bundleVariantId,
   locked = false,
 }: {
   product: AddonProduct;
   addressId: number;
   scheduledAt: string;
+  bundleVariantId: string;
   locked?: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
@@ -1807,6 +2022,7 @@ function AddOnCard({
     fetcher.submit(
       {
         intent: "add_addon",
+        bundleVariantId,
         addressId: String(addressId),
         scheduledAt,
         externalProductId: product.externalProductId,
@@ -1900,7 +2116,19 @@ function AddOnCard({
 
 // ─── Simple charge list (for charges without bundles) ─────────────────────────
 
-function ChargesListSimple({ charges, subscriptions, deliveryDateOffset, modificationWindowDays }: { charges: Charge[]; subscriptions: Subscription[]; deliveryDateOffset: number; modificationWindowDays: number }) {
+function ChargesListSimple({
+  charges,
+  subscriptions,
+  deliveryDateOffset,
+  modificationWindowDays,
+  bundleVariantId,
+}: {
+  charges: Charge[];
+  subscriptions: Subscription[];
+  deliveryDateOffset: number;
+  modificationWindowDays: number;
+  bundleVariantId: string;
+}) {
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-stone-100">
@@ -1910,7 +2138,14 @@ function ChargesListSimple({ charges, subscriptions, deliveryDateOffset, modific
         {charges.map((charge) => {
           const chargeLocked = isChargeLockedClient(charge.scheduled_at, deliveryDateOffset, modificationWindowDays);
           return (
-            <SimpleChargeRow key={charge.id} charge={charge} subscriptions={subscriptions} deliveryDateOffset={deliveryDateOffset} locked={chargeLocked} />
+            <SimpleChargeRow
+              key={charge.id}
+              charge={charge}
+              subscriptions={subscriptions}
+              deliveryDateOffset={deliveryDateOffset}
+              bundleVariantId={bundleVariantId}
+              locked={chargeLocked}
+            />
           );
         })}
       </div>
@@ -1929,7 +2164,19 @@ function isChargeLockedClient(scheduledAt: string, deliveryDateOffset: number, m
   return today >= cutoff;
 }
 
-function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset, locked = false }: { charge: Charge; subscriptions: Subscription[]; deliveryDateOffset: number; locked?: boolean }) {
+function SimpleChargeRow({
+  charge,
+  subscriptions,
+  deliveryDateOffset,
+  bundleVariantId,
+  locked = false,
+}: {
+  charge: Charge;
+  subscriptions: Subscription[];
+  deliveryDateOffset: number;
+  bundleVariantId: string;
+  locked?: boolean;
+}) {
   const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
   const wasSkipped =
@@ -1964,6 +2211,7 @@ function SimpleChargeRow({ charge, subscriptions, deliveryDateOffset, locked = f
       {isQueued && !locked && (
         <fetcher.Form method="post">
           <input type="hidden" name="intent" value="skip" />
+          <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
           <input type="hidden" name="chargeId" value={String(charge.id)} />
           <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
           <button type="submit" disabled={isSubmitting} className="btn-danger-ghost text-xs whitespace-nowrap">

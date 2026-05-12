@@ -24,6 +24,7 @@ import {
   filterCollectionsForWeek,
   getCollectionsWithAvailability,
 } from "~/lib/shopify.server";
+import { requireCustomerOwnsId } from "~/lib/auth.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import {
@@ -88,6 +89,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   if (!/^\d+$/.test(customerId)) {
     throw new Response("Not Found", { status: 404 });
   }
+  await requireCustomerOwnsId(request, customerId);
 
   const url = new URL(request.url);
   const selectedWeek = url.searchParams.get("week");
@@ -314,7 +316,13 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
 // ─── Action ───────────────────────────────────────────────────────────────────
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ params, request }: ActionFunctionArgs) {
+  const { customerId } = params;
+  if (!customerId || !/^\d+$/.test(customerId)) {
+    throw new Response("Not Found", { status: 404 });
+  }
+  await requireCustomerOwnsId(request, customerId);
+
   const formData = await request.formData();
   const intent = formData.get("intent");
   const rawBundleVariantId = formData.get("bundleVariantId");

@@ -10,14 +10,16 @@ import {
   updateAddress,
   updateCustomer,
 } from "~/lib/recharge.server";
+import { requireCustomerOwnsId } from "~/lib/auth.server";
 import type { Address, Customer, PaymentMethod } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Account" }];
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
-export async function loader({ params }: LoaderFunctionArgs) {
+export async function loader({ params, request }: LoaderFunctionArgs) {
   const customerId = params.customerId!;
+  await requireCustomerOwnsId(request, customerId);
   const [customer, addresses, paymentMethods] = await Promise.all([
     getCustomer(customerId),
     listAddresses(customerId),
@@ -30,6 +32,7 @@ export async function loader({ params }: LoaderFunctionArgs) {
 
 export async function action({ request, params }: ActionFunctionArgs) {
   const customerId = params.customerId!;
+  await requireCustomerOwnsId(request, customerId);
   const formData = await request.formData();
   const intent = formData.get("intent");
 

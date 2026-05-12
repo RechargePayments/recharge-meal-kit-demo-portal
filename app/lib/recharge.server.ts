@@ -145,6 +145,13 @@ export async function listQueuedCharges(customerId: string): Promise<Charge[]> {
   return z.array(ChargeSchema).parse(data.charges);
 }
 
+export async function listActiveCharges(customerId: string): Promise<Charge[]> {
+  const data = await api<{ charges: unknown[] }>(
+    `/charges?customer_id=${customerId}&status=queued,skipped&sort_by=scheduled_at-asc&limit=250`
+  );
+  return z.array(ChargeSchema).parse(data.charges);
+}
+
 export async function getCharge(chargeId: string): Promise<Charge> {
   const data = await api<{ charge: unknown }>(`/charges/${chargeId}`);
   return ChargeSchema.parse(data.charge);
@@ -153,6 +160,15 @@ export async function getCharge(chargeId: string): Promise<Charge> {
 export async function skipCharge(chargeId: string, purchaseItemIds?: number[]): Promise<Charge> {
   const body = purchaseItemIds?.length ? { purchase_item_ids: purchaseItemIds } : {};
   const data = await api<{ charge: unknown }>(`/charges/${chargeId}/skip`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return ChargeSchema.parse(data.charge);
+}
+
+export async function unskipCharge(chargeId: string, purchaseItemIds?: number[]): Promise<Charge> {
+  const body = purchaseItemIds?.length ? { purchase_item_ids: purchaseItemIds } : {};
+  const data = await api<{ charge: unknown }>(`/charges/${chargeId}/unskip`, {
     method: "POST",
     body: JSON.stringify(body),
   });

@@ -5,17 +5,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getCustomer,
   getCreditSummary,
+  createBundleSelection,
   createOnetime,
   deleteOnetime,
   getBundleCollectionsFromShopify,
   getBundleProductInfo,
   getBundleSelections,
+  getCharge,
   listBundleSelectionsByPurchaseItemIds,
   getSubscription,
+  listActiveCharges,
   listAddresses,
-  listQueuedCharges,
   listSubscriptions,
   skipCharge,
+  unskipCharge,
   updateAddress,
   updateBundleSelection,
   updateSubscriptionProperties,
@@ -54,6 +57,7 @@ type ChargeTabInfo = {
   totalPrice: string;
   hasBundles: boolean;
   locked: boolean;
+  status: Charge["status"];
 };
 
 type ActiveChargeBundle = {
@@ -96,10 +100,10 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const selectedSubscription = url.searchParams.get("subscription");
 
   // Phase 1: Light data — Recharge only, no Shopify calls
-  const [customer, subscriptions, queuedCharges, customerPreferences, creditSummary, addresses] = await Promise.all([
+  const [customer, subscriptions, activeCharges, customerPreferences, creditSummary, addresses] = await Promise.all([
     getCustomer(customerId),
     listSubscriptions(customerId),
-    listQueuedCharges(customerId),
+    listActiveCharges(customerId),
     Promise.resolve(getCustomerPreferences(customerId)),
     getCreditSummary(customerId).catch(() => null),
     listAddresses(customerId),
@@ -108,7 +112,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   // Phase 2: Check which charges have bundles (Recharge API only)
   const subscriptionPurchaseItemIds = [
     ...new Set(
-      queuedCharges.flatMap((charge) =>
+      activeCharges.flatMap((charge) =>
         charge.line_items
           .filter((lineItem) => lineItem.purchase_item_type === "subscription")
           .map((lineItem) => lineItem.purchase_item_id)
@@ -119,7 +123,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   let chargesBundleCheck: Array<{ charge: Charge; bundleSelections: BundleSelection[] }>;
 
   if (subscriptionPurchaseItemIds.length === 0) {
-    chargesBundleCheck = queuedCharges.map((charge) => ({ charge, bundleSelections: [] }));
+    chargesBundleCheck = activeCharges.map((charge) => ({ charge, bundleSelections: [] }));
   } else {
     try {
       const allBundleSelections = await listBundleSelectionsByPurchaseItemIds(subscriptionPurchaseItemIds);
@@ -135,14 +139,14 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
         }
       }
 
-      chargesBundleCheck = queuedCharges.map((charge) => ({
+      chargesBundleCheck = activeCharges.map((charge) => ({
         charge,
         bundleSelections: bundleSelectionsByCharge.get(charge.id) ?? [],
       }));
     } catch {
       // Fallback for stores where purchase_item_ids is unavailable.
       chargesBundleCheck = await Promise.all(
-        queuedCharges.map(async (charge) => ({
+        activeCharges.map(async (charge) => ({
           charge,
           bundleSelections: await getBundleSelections(charge.id),
         }))
@@ -152,22 +156,42 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   const subscriptionById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
   const bundleSubscriptionMap = new Map<number, BundleSubscriptionTab>();
+
+  // Helper: register a charge under a subscription (deduped chargeIds)
+  function registerChargeForSubscription(purchaseItemId: number, chargeId: number) {
+    const existing = bundleSubscriptionMap.get(purchaseItemId);
+    if (existing) {
+      if (!existing.chargeIds.includes(chargeId)) existing.chargeIds.push(chargeId);
+      return;
+    }
+    const subscription = subscriptionById.get(purchaseItemId);
+    bundleSubscriptionMap.set(purchaseItemId, {
+      purchaseItemId,
+      productTitle: subscription?.product_title ?? `Subscription #${purchaseItemId}`,
+      externalVariantId: subscription?.external_variant_id?.ecommerce ?? null,
+      chargeIds: [chargeId],
+    });
+  }
+
+  // Pass 1 — discover bundle subscriptions via existing bundle_selections.
   for (const { charge, bundleSelections } of chargesBundleCheck) {
     for (const bundleSelection of bundleSelections) {
-      const purchaseItemId = bundleSelection.purchase_item_id;
-      const existing = bundleSubscriptionMap.get(purchaseItemId);
-      if (existing) {
-        if (!existing.chargeIds.includes(charge.id)) existing.chargeIds.push(charge.id);
-        continue;
-      }
+      registerChargeForSubscription(bundleSelection.purchase_item_id, charge.id);
+    }
+  }
 
-      const subscription = subscriptionById.get(purchaseItemId);
-      bundleSubscriptionMap.set(purchaseItemId, {
-        purchaseItemId,
-        productTitle: subscription?.product_title ?? `Subscription #${purchaseItemId}`,
-        externalVariantId: subscription?.external_variant_id?.ecommerce ?? null,
-        chargeIds: [charge.id],
-      });
+  // Pass 2 — also include charges (typically skipped) that reference a known
+  // bundle subscription via their line_items, even if Recharge has dropped the
+  // bundle_selection record. This keeps skipped weeks visible in the tabs.
+  const knownBundleSubscriptionIds = new Set(bundleSubscriptionMap.keys());
+  for (const { charge } of chargesBundleCheck) {
+    for (const lineItem of charge.line_items) {
+      if (
+        lineItem.purchase_item_type === "subscription" &&
+        knownBundleSubscriptionIds.has(lineItem.purchase_item_id)
+      ) {
+        registerChargeForSubscription(lineItem.purchase_item_id, charge.id);
+      }
     }
   }
 
@@ -195,10 +219,15 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? getModificationWindowDays(activeBundleVariantId)
     : DEFAULT_MODIFICATION_WINDOW;
 
+  function chargeBelongsToSubscription(cb: { charge: Charge; bundleSelections: BundleSelection[] }, purchaseItemId: number): boolean {
+    if (cb.bundleSelections.some((selection) => selection.purchase_item_id === purchaseItemId)) return true;
+    return cb.charge.line_items.some(
+      (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === purchaseItemId
+    );
+  }
+
   const chargesForActiveSubscription = activeSubscription
-    ? chargesBundleCheck.filter((cb) =>
-      cb.bundleSelections.some((selection) => selection.purchase_item_id === activeSubscription.purchaseItemId)
-    )
+    ? chargesBundleCheck.filter((cb) => chargeBelongsToSubscription(cb, activeSubscription.purchaseItemId))
     : chargesBundleCheck.filter((cb) => cb.bundleSelections.length > 0);
 
   const chargeTabs: ChargeTabInfo[] = chargesForActiveSubscription.map((cb) => ({
@@ -207,6 +236,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     totalPrice: cb.charge.total_price,
     hasBundles: cb.bundleSelections.length > 0,
     locked: isChargeLocked(cb.charge.scheduled_at, deliveryDateOffset, modificationWindowDays),
+    status: cb.charge.status,
   }));
 
   // Phase 3: Load full Shopify data ONLY for the active/selected charge
@@ -214,13 +244,41 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? chargesForActiveSubscription.find((cb) => String(cb.charge.id) === selectedWeek) ?? chargesForActiveSubscription[0]
     : chargesForActiveSubscription[0];
 
+  const activeCharge = activeEntry?.charge ?? null;
+
   let activeBundle: ActiveChargeBundle | null = null;
 
   if (activeEntry && activeSubscription) {
     const charge = activeEntry.charge;
-    const bundleSelections = activeEntry.bundleSelections.filter(
+    let bundleSelections = activeEntry.bundleSelections.filter(
       (selection) => selection.purchase_item_id === activeSubscription.purchaseItemId
     );
+
+    // If this charge belongs to the active subscription via line_items but has
+    // no bundle_selection (e.g. it was just unskipped, or was created without
+    // any customer customization), build a synthetic placeholder using the
+    // subscription's product info. The customer can then pick meals and we'll
+    // create a real bundle_selection on save.
+    if (bundleSelections.length === 0) {
+      const subscriptionLineItem = charge.line_items.find(
+        (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === activeSubscription.purchaseItemId
+      );
+      if (subscriptionLineItem) {
+        const subscription = subscriptionById.get(activeSubscription.purchaseItemId)
+          ?? await getSubscription(activeSubscription.purchaseItemId).catch(() => null);
+        const synthExternalProductId = subscription?.external_product_id?.ecommerce ?? null;
+        const synthExternalVariantId = subscription?.external_variant_id?.ecommerce ?? null;
+        if (synthExternalProductId) {
+          bundleSelections = [{
+            id: 0,
+            purchase_item_id: activeSubscription.purchaseItemId,
+            external_product_id: synthExternalProductId,
+            external_variant_id: synthExternalVariantId,
+            items: [],
+          }];
+        }
+      }
+    }
 
     if (bundleSelections.length > 0) {
 
@@ -291,19 +349,20 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     );
   }
 
-  const activeAddons = activeBundle
-    ? activeBundle.charge.line_items.filter((li) => li.purchase_item_type === "onetime")
+  const activeAddons = activeCharge
+    ? activeCharge.line_items.filter((li) => li.purchase_item_type === "onetime")
     : [];
 
   return json({
     customer,
     subscriptions,
-    queuedCharges,
+    activeCharges,
     bundleSubscriptions,
     activeSubscriptionId: activeSubscription?.purchaseItemId ?? null,
     activeBundleVariantId,
     chargeTabs,
     activeBundle,
+    activeCharge,
     customerPreferences,
     deliveryDateOffset,
     modificationWindowDays,
@@ -377,6 +436,41 @@ export async function action({ params, request }: ActionFunctionArgs) {
     }
   }
 
+  if (intent === "create_bundle") {
+    const rawChargeId = formData.get("chargeId");
+    const rawPurchaseItemId = formData.get("purchaseItemId");
+    const rawItems = formData.get("items");
+    const scheduledAt = formData.get("scheduledAt");
+    if (typeof rawChargeId !== "string" || typeof rawPurchaseItemId !== "string" || typeof rawItems !== "string") {
+      return json({ error: "Invalid payload", intent: "create_bundle" as const }, { status: 400 });
+    }
+    if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
+      return json({ error: LOCKED_ERROR, intent: "create_bundle" as const }, { status: 403 });
+    }
+    const items = JSON.parse(rawItems) as Array<
+      Pick<BundleSelectionItem, "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity">
+    >;
+    try {
+      await createBundleSelection(Number(rawChargeId), Number(rawPurchaseItemId), items);
+      return json({ success: true, intent: "create_bundle" } as const);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : "Failed to create bundle selection.";
+      let message = "Failed to save selections.";
+      let ranges: number[][] | undefined;
+      const colonIdx = raw.lastIndexOf(": ");
+      if (colonIdx !== -1) {
+        try {
+          const parsed = JSON.parse(raw.slice(colonIdx + 2)) as {
+            errors?: { message?: string; details?: { ranges?: number[][] } };
+          };
+          if (parsed.errors?.message) message = parsed.errors.message;
+          if (parsed.errors?.details?.ranges) ranges = parsed.errors.details.ranges;
+        } catch { /* not JSON */ }
+      }
+      return json({ error: message, ranges, intent: "create_bundle" as const });
+    }
+  }
+
   if (intent === "update_preferences") {
     const customerId = formData.get("customerId");
     const rawInclude = formData.getAll("include");
@@ -413,8 +507,42 @@ export async function action({ params, request }: ActionFunctionArgs) {
       typeof rawPurchaseItemId === "string" && rawPurchaseItemId
         ? [Number(rawPurchaseItemId)]
         : undefined;
+
+    // Delete any onetime add-ons on this charge first, otherwise they would
+    // still get charged when the subscription portion is skipped.
+    try {
+      const existingCharge = await getCharge(chargeId);
+      const onetimeIds = existingCharge.line_items
+        .filter((li) => li.purchase_item_type === "onetime")
+        .map((li) => li.purchase_item_id);
+      if (onetimeIds.length > 0) {
+        await Promise.allSettled(onetimeIds.map((id) => deleteOnetime(id)));
+      }
+    } catch {
+      // best-effort: continue with skip even if onetime cleanup fails
+    }
+
     const charge = await skipCharge(chargeId, purchaseItemIds);
-    return json({ success: true, chargeId: charge.id });
+    return json({ success: true, intent: "skip" as const, chargeId: charge.id });
+  }
+
+  if (intent === "unskip") {
+    const chargeId = formData.get("chargeId");
+    const rawPurchaseItemId = formData.get("purchaseItemId");
+    if (typeof chargeId !== "string") {
+      return json({ error: "Missing chargeId", intent: "unskip" as const }, { status: 400 });
+    }
+    const purchaseItemIds =
+      typeof rawPurchaseItemId === "string" && rawPurchaseItemId
+        ? [Number(rawPurchaseItemId)]
+        : undefined;
+    try {
+      const charge = await unskipCharge(chargeId, purchaseItemIds);
+      return json({ success: true, intent: "unskip" as const, chargeId: charge.id });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to unskip charge.";
+      return json({ error: message, intent: "unskip" as const });
+    }
   }
 
   if (intent === "add_addon") {
@@ -535,12 +663,13 @@ export default function Dashboard() {
   const {
     customer,
     subscriptions,
-    queuedCharges,
+    activeCharges,
     bundleSubscriptions,
     activeSubscriptionId,
     activeBundleVariantId,
     chargeTabs,
     activeBundle,
+    activeCharge,
     customerPreferences,
     deliveryDateOffset,
     modificationWindowDays,
@@ -559,7 +688,12 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [revalidate]);
 
-  const tabsWithBundles = chargeTabs.filter((t) => t.hasBundles);
+  // chargeTabs is already scoped to charges that belong to the active bundle
+  // subscription (matched via bundle_selection or line_item). Show every one
+  // of them so customers can edit, skip, or unskip every week — even charges
+  // whose bundle_selection was dropped (e.g. unskipped weeks) where the
+  // synthetic placeholder lets them pick meals from scratch.
+  const tabsWithBundles = chargeTabs;
   const selectedWeek = searchParams.get("week");
   const activeIndex = selectedWeek
     ? Math.max(0, tabsWithBundles.findIndex((t) => String(t.chargeId) === selectedWeek))
@@ -567,6 +701,18 @@ export default function Dashboard() {
 
   const activeTabLocked = tabsWithBundles[activeIndex]?.locked ?? false;
   const isLoadingTab = navigation.state === "loading";
+
+  const activeChargeIsSkipped = activeCharge?.status === "skipped";
+  // Active subscription's purchase_item_id, used by the SkippedBanner unskip form.
+  // Prefer the bundleSelection's purchase_item_id when available; fall back to
+  // the line_item match for skipped charges whose bundle_selection was dropped.
+  const activeChargePurchaseItemId =
+    activeBundle?.bundleSelections[0]?.purchase_item_id
+    ?? (activeCharge && activeSubscriptionId != null
+      ? activeCharge.line_items.find(
+        (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === activeSubscriptionId
+      )?.purchase_item_id ?? activeSubscriptionId
+      : null);
 
   return (
     <div className="min-h-screen bg-cream bg-grain">
@@ -609,11 +755,19 @@ export default function Dashboard() {
               }}
             />
 
-            {isLoadingTab && !activeBundle ? (
+            {isLoadingTab && !activeBundle && !activeChargeIsSkipped ? (
               <LoadingGrid />
             ) : activeBundle ? (
               <div key={activeBundle.charge.id} className={`animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
-                {activeTabLocked && (
+                {activeBundle.charge.status === "skipped" ? (
+                  <SkippedBanner
+                    chargeId={activeBundle.charge.id}
+                    scheduledAt={activeBundle.charge.scheduled_at}
+                    deliveryDateOffset={deliveryDateOffset}
+                    purchaseItemId={activeChargePurchaseItemId}
+                    bundleVariantId={activeBundleVariantId}
+                  />
+                ) : activeTabLocked && (
                   <LockedBanner
                     scheduledAt={activeBundle.charge.scheduled_at}
                     deliveryDateOffset={deliveryDateOffset}
@@ -657,11 +811,24 @@ export default function Dashboard() {
                   />
                 )}
               </div>
+            ) : activeCharge && activeChargeIsSkipped ? (
+              // Skipped charge whose bundle_selection was dropped by Recharge —
+              // we still want the customer to see the week and unskip it.
+              <div key={activeCharge.id} className="animate-fade-in">
+                <SkippedBanner
+                  chargeId={activeCharge.id}
+                  scheduledAt={activeCharge.scheduled_at}
+                  deliveryDateOffset={deliveryDateOffset}
+                  purchaseItemId={activeChargePurchaseItemId}
+                  bundleVariantId={activeBundleVariantId}
+                />
+                <SkippedChargeSummary charge={activeCharge} deliveryDateOffset={deliveryDateOffset} />
+              </div>
             ) : null}
           </section>
-        ) : queuedCharges.length > 0 ? (
+        ) : activeCharges.length > 0 ? (
           <ChargesListSimple
-            charges={queuedCharges}
+            charges={activeCharges}
             subscriptions={subscriptions}
             deliveryDateOffset={deliveryDateOffset}
             modificationWindowDays={modificationWindowDays}
@@ -1264,6 +1431,154 @@ function DashboardInfoBar({
   );
 }
 
+// ─── Skipped banner ───────────────────────────────────────────────────────────
+
+function SkippedBanner({
+  chargeId,
+  scheduledAt,
+  deliveryDateOffset,
+  purchaseItemId,
+  bundleVariantId,
+}: {
+  chargeId: number;
+  scheduledAt: string;
+  deliveryDateOffset: number;
+  purchaseItemId: number | null;
+  bundleVariantId: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const isUnskipping = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "unskip"; chargeId: number }
+    | { error: string; intent: "unskip" }
+    | undefined;
+  const unskipError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? (fetcherData as { error: string }).error
+      : null;
+
+  const deliveryDate = addDaysToDate(scheduledAt, deliveryDateOffset);
+  const deliveryStr = new Date(deliveryDate).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+
+  return (
+    <div className="card border-2 border-amber-300 bg-amber-50 px-5 py-5 mb-5 animate-slide-up">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+        <div className="flex items-start gap-3 flex-1 min-w-0">
+          <div className="w-10 h-10 rounded-full bg-amber-200 flex items-center justify-center flex-none">
+            <svg className="w-5 h-5 text-amber-800" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 5l7 7-7 7" />
+            </svg>
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-base font-bold text-amber-900 uppercase tracking-wide">This week is skipped</p>
+            <p className="text-sm text-amber-800 mt-1">
+              Your delivery for {deliveryStr} will not be sent. Any add-ons that were on this charge have been removed and will need to be re-added if you unskip.
+            </p>
+            {unskipError && (
+              <p className="text-xs text-red-700 mt-2 font-medium">{unskipError}</p>
+            )}
+          </div>
+        </div>
+
+        <fetcher.Form method="post" className="flex-none">
+          <input type="hidden" name="intent" value="unskip" />
+          <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
+          <input type="hidden" name="chargeId" value={String(chargeId)} />
+          {purchaseItemId != null && (
+            <input type="hidden" name="purchaseItemId" value={String(purchaseItemId)} />
+          )}
+          <button
+            type="submit"
+            disabled={isUnskipping}
+            className="w-full sm:w-auto px-6 py-3 text-base font-bold text-white rounded-xl uppercase tracking-wide shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
+            style={{ backgroundColor: "#b45309" }}
+            onMouseEnter={(e) => { if (!isUnskipping) e.currentTarget.style.backgroundColor = "#92400e"; }}
+            onMouseLeave={(e) => { if (!isUnskipping) e.currentTarget.style.backgroundColor = "#b45309"; }}
+          >
+            {isUnskipping ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Unskipping...
+              </span>
+            ) : (
+              "Unskip Week"
+            )}
+          </button>
+        </fetcher.Form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Read-only summary for a skipped charge without bundle data ──────────────
+
+function SkippedChargeSummary({
+  charge,
+  deliveryDateOffset,
+}: {
+  charge: Charge;
+  deliveryDateOffset: number;
+}) {
+  const subscriptionItems = charge.line_items.filter((li) => li.purchase_item_type === "subscription");
+  const onetimeItems = charge.line_items.filter((li) => li.purchase_item_type === "onetime");
+  const deliveryDate = addDaysToDate(charge.scheduled_at, deliveryDateOffset);
+
+  return (
+    <div className="card p-5 mt-2 opacity-75">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="font-display font-semibold text-stone-900">Selections from this skipped week</h3>
+          <p className="text-xs text-stone-500 mt-0.5">
+            Was scheduled to deliver {formatDate(deliveryDate)} (charged {formatDate(charge.scheduled_at)})
+          </p>
+        </div>
+        <span className="text-sm font-bold text-stone-700">{formatCurrency(charge.total_price)}</span>
+      </div>
+
+      {subscriptionItems.length > 0 ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          {subscriptionItems.map((item, index) => (
+            <div key={`${item.purchase_item_id}-${index}`} className="flex items-center gap-3 p-3 rounded-xl bg-stone-50">
+              {item.images?.small || item.images?.medium ? (
+                <img
+                  src={(item.images?.small ?? item.images?.medium) ?? undefined}
+                  alt={item.title}
+                  className="w-12 h-12 rounded-lg object-cover flex-none bg-white"
+                />
+              ) : (
+                <div className="w-12 h-12 rounded-lg bg-stone-200 flex-none" />
+              )}
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-stone-800 truncate">{item.title}</p>
+                {item.quantity > 1 && (
+                  <p className="text-xs text-stone-500">x{item.quantity}</p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-stone-500">No items were selected for this week.</p>
+      )}
+
+      {onetimeItems.length > 0 && (
+        <p className="mt-4 text-xs text-stone-500 italic">
+          {onetimeItems.length} add-on{onetimeItems.length !== 1 ? "s" : ""} from this week have been removed.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Locked banner ────────────────────────────────────────────────────────────
 
 function LockedBanner({
@@ -1362,7 +1677,14 @@ function WeekTabs({
       <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
         {tabs.map((tab, i) => {
           const isActive = i === activeIndex;
+          const isSkipped = tab.status === "skipped";
           const deliveryDate = addDaysToDate(tab.scheduledAt, deliveryDateOffset);
+          const activeBg = isSkipped
+            ? { backgroundColor: "#b45309", borderColor: "#b45309", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" }
+            : { backgroundColor: "#16a34a", borderColor: "#16a34a", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" };
+          const inactiveClass = isSkipped
+            ? "bg-amber-50 text-amber-800 border-amber-200 hover:border-amber-400"
+            : "bg-white text-stone-600 border-stone-200 hover:border-green-300 hover:text-green-700";
           return (
             <button
               key={tab.chargeId}
@@ -1370,9 +1692,9 @@ function WeekTabs({
               className={`flex-none rounded-2xl px-5 py-3 text-sm font-medium transition-all duration-200 border ${
                 isActive
                   ? "text-white border-transparent scale-[1.02]"
-                  : "bg-white text-stone-600 border-stone-200 hover:border-green-300 hover:text-green-700"
+                  : inactiveClass
               }`}
-              style={isActive ? { backgroundColor: "#16a34a", borderColor: "#16a34a", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" } : undefined}
+              style={isActive ? activeBg : undefined}
             >
               <p className="font-semibold flex items-center gap-1.5">
                 {tab.locked && (
@@ -1380,9 +1702,28 @@ function WeekTabs({
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                   </svg>
                 )}
-                Delivery {formatWeekLabel(deliveryDate)}
+                <span className={isSkipped ? "line-through opacity-80" : undefined}>
+                  Delivery {formatWeekLabel(deliveryDate)}
+                </span>
+                {isSkipped && (
+                  <span
+                    className={`ml-1 inline-flex items-center text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                      isActive ? "bg-white/25 text-white" : "bg-amber-200 text-amber-900"
+                    }`}
+                  >
+                    Skipped
+                  </span>
+                )}
               </p>
-              <p className={`text-xs mt-0.5 ${isActive ? "text-green-200" : "text-stone-400"}`}>
+              <p
+                className={`text-xs mt-0.5 ${
+                  isActive
+                    ? isSkipped
+                      ? "text-amber-100"
+                      : "text-green-200"
+                    : "text-stone-400"
+                }`}
+              >
                 {formatCurrency(tab.totalPrice)} · Charged {formatWeekLabel(tab.scheduledAt)}
               </p>
             </button>
@@ -1515,9 +1856,13 @@ function MealGrid({
   const isSaving = fetcher.state !== "idle";
   const isSkipping = skipFetcher.state !== "idle";
   const fetcherData = fetcher.data as
-    | { success: true; intent: "update_bundle" }
-    | { error: string; ranges?: number[][]; intent: "update_bundle" }
+    | { success: true; intent: "update_bundle" | "create_bundle" }
+    | { error: string; ranges?: number[][]; intent: "update_bundle" | "create_bundle" }
     | undefined;
+  // bundleSelection.id === 0 is the synthetic placeholder built by the loader
+  // for charges that don't yet have a bundle_selection record. Saving from
+  // this state should CREATE the bundle_selection, not update one.
+  const isCreating = bundleSelection.id === 0;
 
   const savedOk = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
   const fetcherError =
@@ -1564,13 +1909,22 @@ function MealGrid({
         quantity,
       }));
     fetcher.submit(
-      {
-        intent: "update_bundle",
-        bundleVariantId,
-        bundleSelectionId: String(bundleSelection.id),
-        items: JSON.stringify(payload),
-        scheduledAt: charge.scheduled_at,
-      },
+      isCreating
+        ? {
+            intent: "create_bundle",
+            bundleVariantId,
+            chargeId: String(charge.id),
+            purchaseItemId: String(bundleSelection.purchase_item_id),
+            items: JSON.stringify(payload),
+            scheduledAt: charge.scheduled_at,
+          }
+        : {
+            intent: "update_bundle",
+            bundleVariantId,
+            bundleSelectionId: String(bundleSelection.id),
+            items: JSON.stringify(payload),
+            scheduledAt: charge.scheduled_at,
+          },
       { method: "post" }
     );
   };
@@ -2187,14 +2541,23 @@ function SimpleChargeRow({
 }) {
   const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
-  const wasSkipped =
-    fetcher.state === "idle" &&
-    fetcher.data != null &&
-    "success" in fetcher.data &&
-    (fetcher.data as { success: boolean }).success === true;
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "skip" | "unskip"; chargeId: number }
+    | { error: string; intent: "skip" | "unskip" }
+    | undefined;
+  const lastSuccessIntent =
+    fetcher.state === "idle" && fetcherData != null && "success" in fetcherData
+      ? fetcherData.intent
+      : null;
 
-  const displayStatus = wasSkipped ? "skipped" : charge.status;
+  const displayStatus =
+    lastSuccessIntent === "skip"
+      ? "skipped"
+      : lastSuccessIntent === "unskip"
+        ? "queued"
+        : charge.status;
   const isQueued = displayStatus === "queued";
+  const isSkipped = displayStatus === "skipped";
 
   return (
     <div className="px-5 py-4 flex items-center gap-4 hover:bg-cream-dark/50 transition-colors">
@@ -2224,6 +2587,23 @@ function SimpleChargeRow({
           <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
           <button type="submit" disabled={isSubmitting} className="btn-danger-ghost text-xs whitespace-nowrap">
             {isSubmitting ? "Skipping..." : "Skip"}
+          </button>
+        </fetcher.Form>
+      )}
+      {isSkipped && (
+        <fetcher.Form method="post">
+          <input type="hidden" name="intent" value="unskip" />
+          <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
+          <input type="hidden" name="chargeId" value={String(charge.id)} />
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="px-3 py-1.5 text-xs font-bold text-white rounded-lg uppercase tracking-wide whitespace-nowrap transition-colors disabled:opacity-60"
+            style={{ backgroundColor: "#b45309" }}
+            onMouseEnter={(e) => { if (!isSubmitting) e.currentTarget.style.backgroundColor = "#92400e"; }}
+            onMouseLeave={(e) => { if (!isSubmitting) e.currentTarget.style.backgroundColor = "#b45309"; }}
+          >
+            {isSubmitting ? "Unskipping..." : "Unskip"}
           </button>
         </fetcher.Form>
       )}

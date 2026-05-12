@@ -39,6 +39,14 @@ export const SubscriptionSchema = z.object({
   has_queued_charges: z.boolean().nullable().optional(),
   is_skippable: z.boolean().nullable().optional(),
   is_swappable: z.boolean().nullable().optional(),
+  external_product_id: z
+    .object({ ecommerce: z.string().nullable().optional() })
+    .nullable()
+    .optional(),
+  external_variant_id: z
+    .object({ ecommerce: z.string().nullable().optional() })
+    .nullable()
+    .optional(),
   sku: z.string().nullable().optional(),
   properties: z.array(PropertySchema).optional(),
 });
@@ -173,6 +181,27 @@ export const BundleCollectionSchema = z.object({
 });
 
 export type BundleCollection = z.infer<typeof BundleCollectionSchema>;
+
+// ─── Bundle Products (Recharge) ───────────────────────────────────────────────
+
+export const BundleProductVariantSchema = z.object({
+  id: z.number(),
+  external_variant_id: z.string(),
+  title: z.string(),
+});
+
+export type BundleProductVariant = z.infer<typeof BundleProductVariantSchema>;
+
+export const BundleProductSchema = z.object({
+  id: z.number(),
+  external_product_id: z.string(),
+  title: z.string(),
+  is_customizable: z.boolean(),
+  price_rule: z.string(),
+  variants: z.array(BundleProductVariantSchema),
+});
+
+export type BundleProduct = z.infer<typeof BundleProductSchema>;
 
 // ─── Credit Summary ──────────────────────────────────────────────────────────
 

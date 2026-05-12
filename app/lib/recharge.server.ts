@@ -5,6 +5,7 @@ import {
   ChargeSchema,
   BundleSelectionSchema,
   BundleCollectionSchema,
+  BundleProductSchema,
   CreditSummarySchema,
   AddressSchema,
   PaymentMethodSchema,
@@ -13,6 +14,7 @@ import {
   type Charge,
   type BundleSelection,
   type BundleCollection,
+  type BundleProduct,
   type BundleItemPayload,
   type CreditSummary,
   type Address,
@@ -236,6 +238,11 @@ export async function getBundleProductCollectionIds(externalProductId: string): 
   return collectionIds;
 }
 
+export async function listBundleProducts(): Promise<BundleProduct[]> {
+  const data = await api<{ bundle_products: unknown[] }>(`/bundle_products?limit=250`);
+  return z.array(BundleProductSchema).parse(data.bundle_products);
+}
+
 export async function getBundleProductInfo(externalProductId: string): Promise<{
   collectionIds: string[];
   quantityRanges: number[][];
@@ -335,17 +342,23 @@ export async function updateAddress(
 
 // ─── Merchant defaults application ───────────────────────────────────────────
 
-// Shopify variant ID for the single variant of the Customizable Dynamic Weekly Bundle.
-// Fetching all subscriptions for this variant in one call avoids per-charge subscription
-// lookups. Future API improvement: a subscription_ids filter on the charges endpoint
-// would eliminate these lookups entirely and better support this merchant use case.
-const BUNDLE_VARIANT_ID = "47959488430339";
+export async function listBundleSubscriptionIds(externalVariantIds: string[]): Promise<Set<number>> {
+  const uniqueVariantIds = [...new Set(externalVariantIds.map((id) => id.trim()).filter(Boolean))];
+  if (uniqueVariantIds.length === 0) {
+    throw new Error("No bundle variant selected. Choose a bundle in merchant admin first.");
+  }
 
-export async function listBundleSubscriptionIds(): Promise<Set<number>> {
-  const data = await api<{ subscriptions: unknown[] }>(
-    `/subscriptions?external_variant_id=${BUNDLE_VARIANT_ID}&limit=250`
+  const responses = await Promise.all(
+    uniqueVariantIds.map((variantId) =>
+      api<{ subscriptions: unknown[] }>(
+        `/subscriptions?external_variant_id=${encodeURIComponent(variantId)}&limit=250`
+      )
+    )
   );
-  const subs = z.array(z.object({ id: z.number() })).parse(data.subscriptions);
+
+  const subs = responses.flatMap((response) =>
+    z.array(z.object({ id: z.number() })).parse(response.subscriptions)
+  );
   return new Set(subs.map((s) => s.id));
 }
 

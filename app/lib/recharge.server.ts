@@ -152,6 +152,13 @@ export async function listActiveCharges(customerId: string): Promise<Charge[]> {
   return z.array(ChargeSchema).parse(data.charges);
 }
 
+export async function listSuccessCharges(customerId: string): Promise<Charge[]> {
+  const data = await api<{ charges: unknown[] }>(
+    `/charges?customer_id=${customerId}&status=success&sort_by=scheduled_at-desc&limit=50`
+  );
+  return z.array(ChargeSchema).parse(data.charges);
+}
+
 export async function getCharge(chargeId: string): Promise<Charge> {
   const data = await api<{ charge: unknown }>(`/charges/${chargeId}`);
   return ChargeSchema.parse(data.charge);

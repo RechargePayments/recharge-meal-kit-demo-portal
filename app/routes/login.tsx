@@ -8,7 +8,7 @@ import {
   startPasswordlessLogin,
 } from "~/lib/auth.server";
 
-export const meta: MetaFunction = () => [{ title: "Sign in — NourishBox" }];
+export const meta: MetaFunction = () => [{ title: "Sign in — Recharge Meals" }];
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const auth = await getOptionalCustomer(request);
@@ -48,16 +48,6 @@ export async function action({ request }: ActionFunctionArgs) {
   return redirect(verifyUrl, { headers: { "Set-Cookie": await commitSession(cookie) } });
 }
 
-function LeafIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 32 32" fill="none">
-      <path d="M16 2C10 2 4 8 4 16c0 6 4 12 12 14C24 28 28 22 28 16 28 8 22 2 16 2z" fill="currentColor" opacity="0.15" />
-      <path d="M8 24C10 14 18 6 28 4c0 0-2 10-8 16s-12 8-12 8z" fill="currentColor" opacity="0.9" />
-      <path d="M12 26C14 20 18 14 26 8" stroke="white" strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />
-    </svg>
-  );
-}
-
 export default function LoginPage() {
   const { pendingEmail } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -71,52 +61,32 @@ export default function LoginPage() {
   const required = reason === "required";
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row">
-      <div className="relative flex-1 bg-gradient-to-br from-brand-800 via-brand-700 to-brand-600 flex items-center justify-center p-8 lg:p-16 overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-brand-500/20 rounded-full -translate-y-1/2 translate-x-1/3" />
-        <div className="absolute bottom-0 left-0 w-72 h-72 bg-brand-400/10 rounded-full translate-y-1/3 -translate-x-1/4" />
-        <div className="absolute top-1/2 left-1/4 w-48 h-48 bg-accent/10 rounded-full" />
+    <div className="min-h-screen bg-cream flex items-center justify-center px-4 py-10 relative overflow-hidden">
+      <div className="pointer-events-none absolute -top-32 -right-24 w-[28rem] h-[28rem] rounded-full bg-brand-200/50 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-32 -left-24 w-[26rem] h-[26rem] rounded-full bg-accent/15 blur-3xl" />
+      <div className="pointer-events-none absolute inset-0 bg-grain opacity-60" />
 
-        <div className="relative z-10 text-center lg:text-left max-w-md">
-          <div className="flex items-center gap-3 justify-center lg:justify-start mb-8">
-            <LeafIcon className="w-10 h-10 text-brand-300" />
-            <span className="text-2xl font-display font-bold text-white tracking-tight">NourishBox</span>
-          </div>
-          <h1 className="text-3xl lg:text-5xl font-display font-bold text-white leading-tight mb-4">
-            Your weekly box,
-            <br />
-            <span className="text-brand-300">your way.</span>
-          </h1>
-          <p className="text-brand-200/80 text-lg leading-relaxed">
-            Choose your favorite chef-crafted meals, customize every delivery, and eat well without the effort.
-          </p>
-          <div className="hidden lg:flex items-center gap-3 mt-10">
-            {["Herb Chicken", "Salmon Bowl", "Veggie Risotto"].map((name) => (
-              <div key={name} className="bg-white/10 backdrop-blur-sm rounded-2xl p-3 border border-white/10">
-                <div className="w-16 h-16 rounded-xl bg-white/10 flex items-center justify-center mb-2">
-                  <svg className="w-8 h-8 text-brand-300/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
-                </div>
-                <p className="text-xs text-white/70 font-medium text-center">{name}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-center p-8 lg:p-16 lg:w-[480px] lg:flex-none">
-        <div className="w-full max-w-sm animate-fade-in">
-          <div className="flex items-center gap-2 lg:hidden mb-8">
-            <LeafIcon className="w-7 h-7 text-brand-600" />
-            <span className="text-lg font-display font-bold text-stone-900">NourishBox</span>
+      <div className="relative w-full max-w-md animate-fade-in">
+        <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-warm-lg border border-stone-100 p-8 sm:p-10">
+          <div className="flex justify-center mb-6">
+            <img
+              src="/logo.png"
+              alt="Recharge Meals"
+              className="h-14 sm:h-16 w-auto"
+            />
           </div>
 
-          <h2 className="text-2xl font-display font-bold text-stone-900 mb-2">Welcome back</h2>
-          <p className="text-stone-500 mb-8">Sign in to manage your upcoming deliveries.</p>
+          <div className="text-center mb-7">
+            <h1 className="text-2xl sm:text-[28px] font-display font-bold text-stone-900 tracking-tight">
+              Welcome back
+            </h1>
+            <p className="text-stone-500 mt-1.5 text-sm">
+              Sign in to manage your upcoming deliveries.
+            </p>
+          </div>
 
           {(expired || required) && !actionData?.error && (
-            <div className="mb-6 rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
+            <div className="mb-5 rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900 animate-slide-up">
               {expired ? "Your session expired. Please sign in again." : "Please sign in to continue."}
             </div>
           )}
@@ -164,12 +134,14 @@ export default function LoginPage() {
               <p className="text-sm text-red-700">{actionData.error}</p>
             </div>
           )}
+        </div>
 
-          <div className="mt-8 pt-6 border-t border-stone-100 text-center">
-            <Link to="/merchant" className="text-xs text-stone-400 hover:text-brand-600 transition-colors">
-              Merchant portal →
-            </Link>
-          </div>
+        <div className="mt-6 flex items-center justify-center gap-4 text-xs text-stone-400">
+          <span>Real food. Real fuel. Delivered.</span>
+          <span aria-hidden="true">·</span>
+          <Link to="/merchant" className="hover:text-brand-700 transition-colors">
+            Merchant portal →
+          </Link>
         </div>
       </div>
     </div>

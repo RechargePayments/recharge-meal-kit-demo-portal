@@ -8,7 +8,7 @@ import {
   startPasswordlessLogin,
 } from "~/lib/auth.server";
 
-export const meta: MetaFunction = () => [{ title: "Verify code — NourishBox" }];
+export const meta: MetaFunction = () => [{ title: "Verify code — Recharge Meals" }];
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const cookie = await getSession(request.headers.get("Cookie"));
@@ -76,16 +76,6 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
-function LeafIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 32 32" fill="none">
-      <path d="M16 2C10 2 4 8 4 16c0 6 4 12 12 14C24 28 28 22 28 16 28 8 22 2 16 2z" fill="currentColor" opacity="0.15" />
-      <path d="M8 24C10 14 18 6 28 4c0 0-2 10-8 16s-12 8-12 8z" fill="currentColor" opacity="0.9" />
-      <path d="M12 26C14 20 18 14 26 8" stroke="white" strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />
-    </svg>
-  );
-}
-
 export default function VerifyPage() {
   const { pendingEmail } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -100,45 +90,41 @@ export default function VerifyPage() {
   const isResending = navigation.state === "submitting" && submittedIntent === "resend";
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row">
-      <div className="relative flex-1 bg-gradient-to-br from-brand-800 via-brand-700 to-brand-600 flex items-center justify-center p-8 lg:p-16 overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-brand-500/20 rounded-full -translate-y-1/2 translate-x-1/3" />
-        <div className="absolute bottom-0 left-0 w-72 h-72 bg-brand-400/10 rounded-full translate-y-1/3 -translate-x-1/4" />
-        <div className="relative z-10 text-center lg:text-left max-w-md">
-          <div className="flex items-center gap-3 justify-center lg:justify-start mb-8">
-            <LeafIcon className="w-10 h-10 text-brand-300" />
-            <span className="text-2xl font-display font-bold text-white tracking-tight">NourishBox</span>
-          </div>
-          <h1 className="text-3xl lg:text-5xl font-display font-bold text-white leading-tight mb-4">
-            Check your inbox.
-          </h1>
-          <p className="text-brand-200/80 text-lg leading-relaxed">
-            We sent a 6-digit code to confirm it&apos;s really you. Enter it on the right to finish signing in.
-          </p>
-        </div>
-      </div>
+    <div className="min-h-screen bg-cream flex items-center justify-center px-4 py-10 relative overflow-hidden">
+      <div className="pointer-events-none absolute -top-32 -right-24 w-[28rem] h-[28rem] rounded-full bg-brand-200/50 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-32 -left-24 w-[26rem] h-[26rem] rounded-full bg-accent/15 blur-3xl" />
+      <div className="pointer-events-none absolute inset-0 bg-grain opacity-60" />
 
-      <div className="flex items-center justify-center p-8 lg:p-16 lg:w-[480px] lg:flex-none">
-        <div className="w-full max-w-sm animate-fade-in">
-          <div className="flex items-center gap-2 lg:hidden mb-8">
-            <LeafIcon className="w-7 h-7 text-brand-600" />
-            <span className="text-lg font-display font-bold text-stone-900">NourishBox</span>
+      <div className="relative w-full max-w-md animate-fade-in">
+        <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-warm-lg border border-stone-100 p-8 sm:p-10">
+          <div className="flex justify-center mb-6">
+            <img
+              src="/logo.png"
+              alt="Recharge Meals"
+              className="h-14 sm:h-16 w-auto"
+            />
           </div>
 
-          <h2 className="text-2xl font-display font-bold text-stone-900 mb-2">Enter your code</h2>
-          <p className="text-stone-500 mb-8">
-            Sent to <span className="font-medium text-stone-700">{pendingEmail}</span>.{" "}
-            <Link
-              to={next ? `/login?next=${encodeURIComponent(next)}` : "/login"}
-              className="text-brand-600 hover:text-brand-700"
-            >
-              Use a different email
-            </Link>
-            .
-          </p>
+          <div className="text-center mb-7">
+            <h1 className="text-2xl sm:text-[28px] font-display font-bold text-stone-900 tracking-tight">
+              Check your inbox
+            </h1>
+            <p className="text-stone-500 mt-1.5 text-sm">
+              We sent a 6-digit code to{" "}
+              <span className="font-medium text-stone-700">{pendingEmail}</span>.
+            </p>
+            <p className="mt-2 text-xs text-stone-400">
+              <Link
+                to={next ? `/login?next=${encodeURIComponent(next)}` : "/login"}
+                className="hover:text-brand-700 transition-colors"
+              >
+                ← Use a different email
+              </Link>
+            </p>
+          </div>
 
           {actionData && "resent" in actionData && actionData.resent && (
-            <div className="mb-4 rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-800">
+            <div className="mb-5 rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-800 animate-slide-up">
               A new code is on its way.
             </div>
           )}
@@ -160,7 +146,7 @@ export default function VerifyPage() {
                 autoFocus
                 required
                 maxLength={8}
-                className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 text-base font-mono tracking-[0.3em] text-stone-800 placeholder:text-stone-300 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition-shadow"
+                className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 text-center text-lg font-mono tracking-[0.4em] text-stone-800 placeholder:text-stone-300 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition-shadow"
               />
             </div>
             <button type="submit" disabled={isVerifying} className="btn-primary w-full py-3.5">
@@ -178,14 +164,14 @@ export default function VerifyPage() {
             </button>
           </Form>
 
-          <Form method="post" className="mt-4">
+          <Form method="post" className="mt-3">
             <input type="hidden" name="intent" value="resend" />
             <button
               type="submit"
               disabled={isResending}
-              className="w-full text-sm text-stone-500 hover:text-brand-600 transition-colors py-2"
+              className="w-full text-sm text-stone-500 hover:text-brand-700 transition-colors py-2 disabled:opacity-50"
             >
-              {isResending ? "Resending…" : "Resend code"}
+              {isResending ? "Resending…" : "Didn't get it? Resend code"}
             </button>
           </Form>
 
@@ -197,6 +183,10 @@ export default function VerifyPage() {
               <p className="text-sm text-red-700">{actionData.error}</p>
             </div>
           )}
+        </div>
+
+        <div className="mt-6 text-center text-xs text-stone-400">
+          Real food. Real fuel. Delivered.
         </div>
       </div>
     </div>

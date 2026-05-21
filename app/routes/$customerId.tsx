@@ -23,10 +23,6 @@ import {
   updateBundleSelection,
   updateSubscriptionProperties,
 } from "~/lib/recharge.server";
-import {
-  filterCollectionsForWeek,
-  getCollectionsWithAvailability,
-} from "~/lib/shopify.server";
 import { requireCustomerOwnsId } from "~/lib/auth.server";
 import { getWeekAssignments } from "~/lib/week-assignments.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
@@ -287,10 +283,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
       const subscriptionTitles = Object.fromEntries(subs.map((s) => [s.id, s.product_title]));
 
       const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
-      const [bundleProductInfoList, collectionsWithAvailability] = await Promise.all([
-        Promise.all(uniqueProductIds.map(getBundleProductInfo)),
-        getCollectionsWithAvailability(),
-      ]);
+      const bundleProductInfoList = await Promise.all(uniqueProductIds.map(getBundleProductInfo));
 
       const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
       const collectionIds = [
@@ -298,9 +291,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
       ];
 
       const weekStart = getMondayOf(charge.scheduled_at);
-      const savedAssignments = getWeekAssignments(activeBundleVariantId, weekStart);
-      const eligibleCollectionIds = savedAssignments
-        ?? filterCollectionsForWeek(collectionsWithAvailability, weekStart).map((c) => String(c.id));
+      const eligibleCollectionIds = getWeekAssignments(activeBundleVariantId, weekStart) ?? [];
 
       const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
       const collectionsByProductId = Object.fromEntries(

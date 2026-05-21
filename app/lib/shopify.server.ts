@@ -101,49 +101,10 @@ const ShopifyCollectionSchema = z.object({
 
 export type ShopifyCollection = z.infer<typeof ShopifyCollectionSchema>;
 
-export type CollectionWithAvailability = ShopifyCollection & {
-  availableFrom: Date | null;
-  availableUntil: Date | null;
-};
-
-export async function getCollectionsWithAvailability(): Promise<CollectionWithAvailability[]> {
+export async function listBundleCollections(): Promise<ShopifyCollection[]> {
   const data = await shopifyFetch<{ custom_collections: unknown[] }>(
     `/custom_collections.json?fields=id,title,handle&published_status=published&limit=250`
   );
   const collections = z.array(ShopifyCollectionSchema).parse(data.custom_collections);
-
-  return Promise.all(
-    collections.map(async (collection) => {
-      const mfData = await shopifyFetch<{
-        metafields: Array<{ namespace: string; key: string; value: string }>;
-      }>(`/custom_collections/${collection.id}/metafields.json?namespace=bundle`);
-
-      const get = (key: string) =>
-        mfData.metafields.find((mf) => mf.key === key)?.value ?? null;
-
-      const fromVal = get("available_from");
-      const untilVal = get("available_until");
-
-      return {
-        ...collection,
-        availableFrom: fromVal ? new Date(fromVal + "T00:00:00") : null,
-        availableUntil: untilVal ? new Date(untilVal + "T00:00:00") : null,
-      };
-    })
-  );
-}
-
-export function filterCollectionsForWeek(
-  collections: CollectionWithAvailability[],
-  weekStart: string
-): CollectionWithAvailability[] {
-  const start = new Date(weekStart + "T00:00:00");
-  const end = new Date(weekStart + "T00:00:00");
-  end.setDate(start.getDate() + 6);
-
-  return collections.filter((c) => {
-    if (!c.availableFrom) return false;
-    const until = c.availableUntil ?? new Date(8640000000000000);
-    return c.availableFrom <= end && until >= start;
-  });
+  return collections;
 }

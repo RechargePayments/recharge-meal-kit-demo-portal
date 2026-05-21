@@ -24,10 +24,7 @@ import {
   listQueuedChargesForWeek,
   updateBundleSelection,
 } from "~/lib/recharge.server";
-import {
-  filterCollectionsForWeek,
-  getCollectionsWithAvailability,
-} from "~/lib/shopify.server";
+import { listBundleCollections } from "~/lib/shopify.server";
 import {
   getAllWeekAssignments,
   saveWeekAssignments,
@@ -75,8 +72,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const requestedBundleVariantId = url.searchParams.get("bundle");
   const weekStarts = getUpcomingWeekStarts();
 
-  const [collectionsWithAvailability, bundleProducts] = await Promise.all([
-    getCollectionsWithAvailability(),
+  const [shopifyCollections, bundleProducts] = await Promise.all([
+    listBundleCollections(),
     listBundleProducts(),
   ]);
 
@@ -110,23 +107,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ? getAllWeekAssignments(currentBundleVariantId)
     : {};
 
-  const allCollections = collectionsWithAvailability.map((c) => ({
+  const allCollections = shopifyCollections.map((c) => ({
     id: String(c.id),
     title: c.title,
     handle: c.handle,
-    availableFrom: c.availableFrom?.toISOString().slice(0, 10) ?? null,
-    availableUntil: c.availableUntil?.toISOString().slice(0, 10) ?? null,
   }));
 
   const assignedPerWeek: Record<string, string[]> = {};
   for (const w of weekStarts) {
-    const saved = allAssignments[w];
-    if (saved) {
-      assignedPerWeek[w] = saved;
-    } else {
-      const eligible = filterCollectionsForWeek(collectionsWithAvailability, w);
-      assignedPerWeek[w] = eligible.map((c) => String(c.id));
-    }
+    assignedPerWeek[w] = allAssignments[w] ?? [];
   }
 
   const uniqueIds = [...new Set(Object.values(assignedPerWeek).flat())];
@@ -144,8 +133,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
             ? {
                 ...bc,
                 title: meta?.title ?? bc.title,
-                availableFrom: meta?.availableFrom ?? null,
-                availableUntil: meta?.availableUntil ?? null,
               }
             : null;
         })
@@ -252,14 +239,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const { targetQuantity } = getWeeklyConfig(bundleVariantId, weekStart);
 
     try {
-      const saved = getWeekAssignments(bundleVariantId, weekStart);
-      let collectionIds: string[];
-      if (saved) {
-        collectionIds = saved;
-      } else {
-        const collectionsWithAvailability = await getCollectionsWithAvailability();
-        const eligible = filterCollectionsForWeek(collectionsWithAvailability, weekStart);
-        collectionIds = eligible.map((c) => String(c.id));
+      const collectionIds = getWeekAssignments(bundleVariantId, weekStart);
+      if (!collectionIds || collectionIds.length === 0) {
+        return json(
+          { error: "No collections assigned for this week. Assign collections before applying defaults." },
+          { status: 400 }
+        );
       }
 
       const [bundleCollections, allPreferences, bundleSubIds, charges] = await Promise.all([
@@ -807,8 +792,6 @@ type SimpleCollection = {
   id: string;
   title: string;
   handle: string;
-  availableFrom: string | null;
-  availableUntil: string | null;
 };
 
 function AssignPanel({
@@ -935,14 +918,6 @@ function AssignPanel({
                   <p className="text-sm font-medium text-gray-800">{collection.title}</p>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-xs text-gray-400">{collection.handle}</span>
-                    {(collection.availableFrom || collection.availableUntil) && (
-                      <>
-                        <span className="text-gray-200">·</span>
-                        <span className="text-xs text-gray-400">
-                          {formatDateRange(collection.availableFrom, collection.availableUntil)}
-                        </span>
-                      </>
-                    )}
                   </div>
                 </div>
                 {isSelected && (
@@ -974,21 +949,7 @@ function AssignPanel({
 
 // ─── Sort-order / defaults panel ──────────────────────────────────────────────
 
-type CollectionWithDates = BundleCollection & {
-  availableFrom: string | null;
-  availableUntil: string | null;
-};
-
 type WeeklyConfig = { targetQuantity: number };
-
-function formatDateRange(from: string | null, until: string | null): string {
-  const fmt = (d: string) =>
-    new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  if (from && until) return `${fmt(from)} – ${fmt(until)}`;
-  if (from) return `From ${fmt(from)}`;
-  if (until) return `Until ${fmt(until)}`;
-  return "";
-}
 
 const DIETARY_TAGS = ["dairy", "wheat", "gluten free", "vegetarian", "vegan", "meat", "fish", "nut", "soy", "egg"];
 
@@ -1006,7 +967,7 @@ function WeekPanel({
 }: {
   bundleVariantId: string;
   weekStart: string;
-  collections: CollectionWithDates[];
+  collections: BundleCollection[];
   savedConfig: WeeklyConfig | null;
 }) {
   const saveFetcher = useFetcher<typeof action>();
@@ -1127,11 +1088,6 @@ function WeekPanel({
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
                   {collection.title}
                 </p>
-                {(collection.availableFrom || collection.availableUntil) && (
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    {formatDateRange(collection.availableFrom, collection.availableUntil)}
-                  </p>
-                )}
               </div>
               {collection.products.map((product) => {
                 positionCounter++;

@@ -268,7 +268,6 @@ For the full demo experience, your Recharge store should have:
 - The `enable_future_charge_manipulation` / `enable_multiple_active_queued_charges` beta flags enabled
 - At least one customer with **active bundle subscriptions** and **multiple queued charges**
 - Shopify **custom collections** set up with products (these power the meal/item picker in the portal)
-- (Optional) Collection metafields with namespace `bundle` and keys `available_from` / `available_until` (date strings like `2026-05-01`) to control which collections are available for which weeks
 
 ---
 

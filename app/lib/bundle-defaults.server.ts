@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { BundleItemPayload } from "./types";
 import { LEGACY_BUNDLE_VARIANT_ID } from "./bundle-config";
 
 const STORE_PATH = join(process.cwd(), "data", "bundle-defaults.json");
@@ -11,7 +10,6 @@ export type WeeklyConfig = { targetQuantity: number };
 
 type BundleDefaults = {
   weeklyConfig?: Record<string, WeeklyConfig>;
-  weeklyDefaults?: Record<string, BundleItemPayload[]>;
 };
 
 type Store = Record<string, BundleDefaults>;
@@ -21,7 +19,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isLegacyStoreShape(raw: unknown): raw is BundleDefaults {
-  return isObject(raw) && ("weeklyConfig" in raw || "weeklyDefaults" in raw);
+  return isObject(raw) && "weeklyConfig" in raw;
 }
 
 function normalizeBundleDefaults(raw: unknown): BundleDefaults {
@@ -39,14 +37,6 @@ function normalizeBundleDefaults(raw: unknown): BundleDefaults {
               : MEALS_PER_WEEK;
           return [[weekStart, { targetQuantity }] as const];
         })
-    );
-  }
-
-  if (isObject(raw.weeklyDefaults)) {
-    normalized.weeklyDefaults = Object.fromEntries(
-      Object.entries(raw.weeklyDefaults)
-        .filter(([weekStart, value]) => weekStart.length > 0 && Array.isArray(value))
-        .map(([weekStart, value]) => [weekStart, value as BundleItemPayload[]])
     );
   }
 
@@ -113,25 +103,6 @@ export function saveWeeklyConfig(
   if (!store[bundleVariantId]) store[bundleVariantId] = {};
   if (!store[bundleVariantId].weeklyConfig) store[bundleVariantId].weeklyConfig = {};
   store[bundleVariantId].weeklyConfig![weekStart] = config;
-  writeStore(store);
-}
-
-/** @deprecated Kept for backward compatibility with old store format */
-export function getWeeklyDefaults(bundleVariantId: string): Record<string, BundleItemPayload[]> {
-  const store = readStore();
-  return getBundleDefaults(store, bundleVariantId).weeklyDefaults ?? {};
-}
-
-/** @deprecated Kept for backward compatibility with old store format */
-export function saveWeeklyDefault(
-  bundleVariantId: string,
-  weekStart: string,
-  selections: BundleItemPayload[]
-): void {
-  const store = readStore();
-  if (!store[bundleVariantId]) store[bundleVariantId] = {};
-  if (!store[bundleVariantId].weeklyDefaults) store[bundleVariantId].weeklyDefaults = {};
-  store[bundleVariantId].weeklyDefaults![weekStart] = selections;
   writeStore(store);
 }
 

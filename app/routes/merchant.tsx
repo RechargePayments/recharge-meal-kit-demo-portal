@@ -26,10 +26,12 @@ import {
 } from "~/lib/recharge.server";
 import { listBundleCollections } from "~/lib/shopify.server";
 import {
-  getAllWeekAssignments,
-  saveWeekAssignments,
-  getWeekAssignments,
-} from "~/lib/week-assignments.server";
+  bucketByWeek,
+  listPresetSchedules,
+  PresetScheduleApiError,
+  syncWeekAssignments,
+  weekEndFor,
+} from "~/lib/preset-schedules.server";
 import {
   getDeliveryDateOffset,
   getActiveBundleVariantId,
@@ -46,6 +48,16 @@ import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW } from "~/lib/bund
 import type { BundleCollection } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
+
+async function resolveBundleProductId(externalVariantId: string): Promise<number | null> {
+  const products = await listBundleProducts();
+  for (const product of products) {
+    if (product.variants.some((v) => v.external_variant_id === externalVariantId)) {
+      return product.id;
+    }
+  }
+  return null;
+}
 
 type ApplyChargeResult = {
   chargeId: number;
@@ -103,9 +115,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ?? null;
 
   const configs = currentBundleVariantId ? getAllWeeklyConfigs(currentBundleVariantId) : {};
-  const allAssignments = currentBundleVariantId
-    ? getAllWeekAssignments(currentBundleVariantId)
-    : {};
+
+  const currentBundleProductId = currentBundleVariantId
+    ? bundleVariantOptions.find((opt) => opt.externalVariantId === currentBundleVariantId)?.bundleProductId
+      ?? null
+    : null;
+
+  let allAssignments: Record<string, string[]> = {};
+  let presetSchedulesError: string | null = null;
+  if (currentBundleProductId != null) {
+    try {
+      const rows = await listPresetSchedules({ bundleProductId: currentBundleProductId });
+      allAssignments = bucketByWeek(rows, weekStarts);
+    } catch (err) {
+      presetSchedulesError =
+        err instanceof PresetScheduleApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to load preset schedules";
+    }
+  }
 
   const allCollections = shopifyCollections.map((c) => ({
     id: String(c.id),
@@ -154,6 +184,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     weekStarts,
     bundleVariantOptions,
     currentBundleVariantId,
+    currentBundleProductId,
     activeBundleVariantId: storedActiveBundleVariantId,
     allCollections,
     assignedPerWeek,
@@ -162,6 +193,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     deliveryDateOffset,
     modificationWindowDays,
     addonCollectionIds,
+    presetSchedulesError,
   });
 }
 
@@ -211,7 +243,30 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
     const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
-    saveWeekAssignments(bundleVariantId, weekStart, collectionIds);
+
+    const bundleProductId = await resolveBundleProductId(bundleVariantId);
+    if (bundleProductId == null) {
+      return json({ error: "Could not resolve bundle product for the selected variant" }, { status: 400 });
+    }
+
+    try {
+      await syncWeekAssignments({
+        bundleProductId,
+        weekStart,
+        weekEnd: weekEndFor(weekStart),
+        desiredCollectionIds: collectionIds,
+      });
+    } catch (err) {
+      const message =
+        err instanceof PresetScheduleApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to save assignments";
+      const status = err instanceof PresetScheduleApiError ? err.status : 500;
+      return json({ error: message }, { status });
+    }
+
     return json({ success: true, intent: "save_assignments" as const, weekStart });
   }
 
@@ -239,8 +294,18 @@ export async function action({ request }: ActionFunctionArgs) {
     const { targetQuantity } = getWeeklyConfig(bundleVariantId, weekStart);
 
     try {
-      const collectionIds = getWeekAssignments(bundleVariantId, weekStart);
-      if (!collectionIds || collectionIds.length === 0) {
+      const bundleProductId = await resolveBundleProductId(bundleVariantId);
+      if (bundleProductId == null) {
+        return json(
+          { error: "Could not resolve bundle product for the selected variant" },
+          { status: 400 }
+        );
+      }
+      const presetRows = await listPresetSchedules({ bundleProductId });
+      const collectionIds = presetRows
+        .filter((row) => row.start_date === weekStart)
+        .map((row) => row.external_collection_id);
+      if (collectionIds.length === 0) {
         return json(
           { error: "No collections assigned for this week. Assign collections before applying defaults." },
           { status: 400 }

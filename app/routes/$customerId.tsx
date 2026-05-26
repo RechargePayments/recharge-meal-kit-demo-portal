@@ -12,6 +12,7 @@ import {
   getBundleProductInfo,
   getBundleSelections,
   getCharge,
+  listBundleProducts,
   listBundleSelectionsByPurchaseItemIds,
   getSubscription,
   listActiveCharges,
@@ -24,7 +25,7 @@ import {
   updateSubscriptionProperties,
 } from "~/lib/recharge.server";
 import { requireCustomerOwnsId } from "~/lib/auth.server";
-import { getWeekAssignments } from "~/lib/week-assignments.server";
+import { listPresetSchedules } from "~/lib/preset-schedules.server";
 import { getCustomerPreferences, saveCustomerPreferences, type CustomerPreference } from "~/lib/customer-preferences.server";
 import {
   getActiveBundleVariantId,
@@ -291,7 +292,21 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
       ];
 
       const weekStart = getMondayOf(charge.scheduled_at);
-      const eligibleCollectionIds = getWeekAssignments(activeBundleVariantId, weekStart) ?? [];
+      const bundleProducts = await listBundleProducts();
+      const activeBundleProductId =
+        bundleProducts.find((p) =>
+          p.variants.some((v) => v.external_variant_id === activeBundleVariantId)
+        )?.id ?? null;
+      const eligibleCollectionIds =
+        activeBundleProductId != null
+          ? await listPresetSchedules({ bundleProductId: activeBundleProductId })
+              .then((rows) =>
+                rows
+                  .filter((row) => row.start_date === weekStart)
+                  .map((row) => row.external_collection_id)
+              )
+              .catch(() => [] as string[])
+          : [];
 
       const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
       const collectionsByProductId = Object.fromEntries(

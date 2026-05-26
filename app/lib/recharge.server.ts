@@ -36,7 +36,7 @@ function authHeaders(): Record<string, string> {
   };
 }
 
-async function api<T>(
+export async function rechargeFetch<T>(
   path: string,
   options: RequestInit = {},
   maxRetries = 3
@@ -66,6 +66,8 @@ async function api<T>(
 
   throw new Error(`Recharge — ${path}: exhausted retries`);
 }
+
+const api = rechargeFetch;
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
 

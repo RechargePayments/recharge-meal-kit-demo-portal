@@ -64,6 +64,7 @@ type ActiveChargeBundle = {
   collectionsByProductId: Record<string, BundleCollection[]>;
   bundleProductRangesByProductId: Record<string, number[][]>;
   eligibleCollectionIds: string[];
+  hasPresetForWeek: boolean;
 };
 
 type AddonProduct = {
@@ -286,11 +287,6 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
       const uniqueProductIds = [...new Set(bundleSelections.map((bs) => bs.external_product_id).filter(Boolean))] as string[];
       const bundleProductInfoList = await Promise.all(uniqueProductIds.map(getBundleProductInfo));
 
-      const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
-      const collectionIds = [
-        ...new Set([...selectionCollectionIds, ...bundleProductInfoList.flatMap((info) => info.collectionIds)]),
-      ];
-
       const weekStart = getMondayOf(charge.scheduled_at);
       const bundleProducts = await listBundleProducts();
       const activeBundleProductId =
@@ -308,6 +304,11 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
               .catch(() => [] as string[])
           : [];
 
+      const hasPresetForWeek = eligibleCollectionIds.length > 0;
+
+      const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
+      const collectionIds = [...new Set([...eligibleCollectionIds, ...selectionCollectionIds])];
+
       const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
       const collectionsByProductId = Object.fromEntries(
         uniqueProductIds.map((pid) => [pid, availableCollections])
@@ -323,6 +324,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
         collectionsByProductId,
         bundleProductRangesByProductId,
         eligibleCollectionIds: [...new Set(eligibleCollectionIds)],
+        hasPresetForWeek,
       };
     }
   }
@@ -791,6 +793,7 @@ export default function Dashboard() {
                     quantityRanges={bs.external_product_id ? (activeBundle.bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
                     preferences={customerPreferences}
                     eligibleCollectionIds={activeBundle.eligibleCollectionIds}
+                    hasPresetForWeek={activeBundle.hasPresetForWeek}
                     deliveryDateOffset={deliveryDateOffset}
                     bundleVariantId={activeBundleVariantId}
                     locked={activeTabLocked}
@@ -1842,6 +1845,7 @@ function MealGrid({
   quantityRanges,
   preferences,
   eligibleCollectionIds,
+  hasPresetForWeek,
   deliveryDateOffset,
   bundleVariantId,
   locked = false,
@@ -1853,6 +1857,7 @@ function MealGrid({
   quantityRanges: number[][];
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
+  hasPresetForWeek: boolean;
   deliveryDateOffset: number;
   bundleVariantId: string;
   locked?: boolean;
@@ -2002,6 +2007,21 @@ function MealGrid({
       )}
 
       {/* Meal cards grid */}
+      {!hasPresetForWeek && items.length === 0 ? (
+        <div className="card p-8 text-center">
+          <div className="mx-auto w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mb-4">
+            <svg className="w-6 h-6 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </div>
+          <h3 className="font-display font-semibold text-stone-900 mb-1">
+            No menu available for this week
+          </h3>
+          <p className="text-sm text-stone-500 max-w-md mx-auto">
+            The menu for this delivery date hasn&rsquo;t been published yet. Check back later, or contact support if you need help.
+          </p>
+        </div>
+      ) : (
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         {items.map((item, index) => {
           const isSelected = item.quantity > 0;
@@ -2118,6 +2138,7 @@ function MealGrid({
           );
         })}
       </div>
+      )}
 
       {/* Sticky footer */}
       {chargeIsQueued && !locked && (

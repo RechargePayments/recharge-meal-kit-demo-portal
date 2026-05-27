@@ -85,6 +85,31 @@ export async function createPresetSchedule(args: {
   }
 }
 
+export async function updatePresetSchedule(args: {
+  id: number;
+  externalCollectionId: string;
+  startDate?: string;
+  endDate?: string;
+}): Promise<PresetSchedule> {
+  try {
+    const body: Record<string, unknown> = {
+      external_collection_id: args.externalCollectionId,
+    };
+    if (args.startDate) body.start_date = args.startDate;
+    if (args.endDate) body.end_date = args.endDate;
+    const data = await rechargeFetch<{ bundle_selection_preset_schedule: unknown }>(
+      `/bundle_selections/preset_schedules/${args.id}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }
+    );
+    return PresetScheduleRowSchema.parse(data.bundle_selection_preset_schedule);
+  } catch (err) {
+    return rethrow(err);
+  }
+}
+
 export async function deletePresetSchedule(id: number): Promise<void> {
   try {
     await rechargeFetch(`/bundle_selections/preset_schedules/${id}`, { method: "DELETE" });
@@ -104,54 +129,71 @@ export function weekEndFor(weekStart: string): string {
 }
 
 /**
- * Bucket preset_schedule rows back into a `{ [weekStart]: collectionIds[] }` map.
- * Only rows whose start_date matches one of `weekStarts` are kept; rows for
- * other date ranges are ignored (e.g. multi-week or custom ranges set outside
- * the portal).
+ * Bucket preset_schedule rows into `{ [weekStart]: collectionId | null }`.
+ * Each week holds at most one collection.
  */
 export function bucketByWeek(
   rows: PresetSchedule[],
   weekStarts: string[]
-): Record<string, string[]> {
+): Record<string, string | null> {
   const allowed = new Set(weekStarts);
-  const out: Record<string, string[]> = {};
-  for (const w of weekStarts) out[w] = [];
+  const out: Record<string, string | null> = {};
+  for (const w of weekStarts) out[w] = null;
   for (const row of rows) {
     if (!allowed.has(row.start_date)) continue;
-    out[row.start_date].push(row.external_collection_id);
+    if (out[row.start_date] == null) {
+      out[row.start_date] = row.external_collection_id;
+    }
   }
   return out;
 }
 
 /**
- * Make the API match `desiredCollectionIds` for the given week. Diffs existing
- * rows (filtered to those whose start_date equals weekStart) against desired
- * and issues the minimum set of create + delete calls.
+ * Make the API match a single `desiredCollectionId` (or none) for the given
+ * week. Repurposes the first existing row via PUT to avoid delete+create
+ * churn, deletes any extras, and POSTs only when no row exists yet.
  */
 export async function syncWeekAssignments(args: {
   bundleProductId: number;
   weekStart: string;
   weekEnd: string;
-  desiredCollectionIds: string[];
+  desiredCollectionId: string | null;
 }): Promise<void> {
   const existing = await listPresetSchedules({ bundleProductId: args.bundleProductId });
   const weekRows = existing.filter((row) => row.start_date === args.weekStart);
+  const desired = args.desiredCollectionId;
 
-  const existingIds = new Set(weekRows.map((r) => r.external_collection_id));
-  const desiredIds = new Set(args.desiredCollectionIds);
-
-  const toCreate = [...desiredIds].filter((id) => !existingIds.has(id));
-  const toDelete = weekRows.filter((r) => !desiredIds.has(r.external_collection_id));
-
-  for (const row of toDelete) {
-    await deletePresetSchedule(row.id);
+  if (desired == null) {
+    for (const row of weekRows) {
+      await deletePresetSchedule(row.id);
+    }
+    return;
   }
-  for (const collectionId of toCreate) {
-    await createPresetSchedule({
-      bundleProductId: args.bundleProductId,
-      externalCollectionId: collectionId,
+
+  const matching = weekRows.find((r) => r.external_collection_id === desired);
+  if (matching) {
+    for (const row of weekRows) {
+      if (row.id !== matching.id) await deletePresetSchedule(row.id);
+    }
+    return;
+  }
+
+  const [first, ...extras] = weekRows;
+  if (first) {
+    await updatePresetSchedule({
+      id: first.id,
+      externalCollectionId: desired,
       startDate: args.weekStart,
       endDate: args.weekEnd,
     });
+    for (const row of extras) await deletePresetSchedule(row.id);
+    return;
   }
+
+  await createPresetSchedule({
+    bundleProductId: args.bundleProductId,
+    externalCollectionId: desired,
+    startDate: args.weekStart,
+    endDate: args.weekEnd,
+  });
 }

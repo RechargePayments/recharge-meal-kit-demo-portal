@@ -26,10 +26,12 @@ import {
 } from "~/lib/recharge.server";
 import { listBundleCollections } from "~/lib/shopify.server";
 import {
-  getAllWeekAssignments,
-  saveWeekAssignments,
-  getWeekAssignments,
-} from "~/lib/week-assignments.server";
+  bucketByWeek,
+  listPresetSchedules,
+  PresetScheduleApiError,
+  syncWeekAssignments,
+  weekEndFor,
+} from "~/lib/preset-schedules.server";
 import {
   getDeliveryDateOffset,
   getActiveBundleVariantId,
@@ -46,6 +48,16 @@ import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW } from "~/lib/bund
 import type { BundleCollection } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
+
+async function resolveBundleProductId(externalVariantId: string): Promise<number | null> {
+  const products = await listBundleProducts();
+  for (const product of products) {
+    if (product.variants.some((v) => v.external_variant_id === externalVariantId)) {
+      return product.id;
+    }
+  }
+  return null;
+}
 
 type ApplyChargeResult = {
   chargeId: number;
@@ -103,9 +115,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ?? null;
 
   const configs = currentBundleVariantId ? getAllWeeklyConfigs(currentBundleVariantId) : {};
-  const allAssignments = currentBundleVariantId
-    ? getAllWeekAssignments(currentBundleVariantId)
-    : {};
+
+  const currentBundleProductId = currentBundleVariantId
+    ? bundleVariantOptions.find((opt) => opt.externalVariantId === currentBundleVariantId)?.bundleProductId
+      ?? null
+    : null;
+
+  let allAssignments: Record<string, string | null> = {};
+  let presetSchedulesError: string | null = null;
+  if (currentBundleProductId != null) {
+    try {
+      const rows = await listPresetSchedules({ bundleProductId: currentBundleProductId });
+      allAssignments = bucketByWeek(rows, weekStarts);
+    } catch (err) {
+      presetSchedulesError =
+        err instanceof PresetScheduleApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to load preset schedules";
+    }
+  }
 
   const allCollections = shopifyCollections.map((c) => ({
     id: String(c.id),
@@ -113,31 +143,26 @@ export async function loader({ request }: LoaderFunctionArgs) {
     handle: c.handle,
   }));
 
-  const assignedPerWeek: Record<string, string[]> = {};
+  const assignedPerWeek: Record<string, string | null> = {};
   for (const w of weekStarts) {
-    assignedPerWeek[w] = allAssignments[w] ?? [];
+    assignedPerWeek[w] = allAssignments[w] ?? null;
   }
 
-  const uniqueIds = [...new Set(Object.values(assignedPerWeek).flat())];
+  const uniqueIds = [
+    ...new Set(Object.values(assignedPerWeek).filter((id): id is string => id != null)),
+  ];
   const bundleCollections = await getBundleCollectionsFromShopify(uniqueIds, { sorted: true });
   const bundleCollectionMap = Object.fromEntries(bundleCollections.map((c) => [c.id, c]));
 
   const collectionsPerWeek = Object.fromEntries(
-    weekStarts.map((w) => [
-      w,
-      (assignedPerWeek[w] ?? [])
-        .map((id) => {
-          const bc = bundleCollectionMap[id];
-          const meta = allCollections.find((c) => c.id === id);
-          return bc
-            ? {
-                ...bc,
-                title: meta?.title ?? bc.title,
-              }
-            : null;
-        })
-        .filter((c): c is NonNullable<typeof c> => c !== null),
-    ])
+    weekStarts.map((w) => {
+      const id = assignedPerWeek[w];
+      if (id == null) return [w, []];
+      const bc = bundleCollectionMap[id];
+      if (!bc) return [w, []];
+      const meta = allCollections.find((c) => c.id === id);
+      return [w, [{ ...bc, title: meta?.title ?? bc.title }]];
+    })
   );
 
   const deliveryDateOffset = currentBundleVariantId
@@ -154,6 +179,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     weekStarts,
     bundleVariantOptions,
     currentBundleVariantId,
+    currentBundleProductId,
     activeBundleVariantId: storedActiveBundleVariantId,
     allCollections,
     assignedPerWeek,
@@ -162,6 +188,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     deliveryDateOffset,
     modificationWindowDays,
     addonCollectionIds,
+    presetSchedulesError,
   });
 }
 
@@ -202,16 +229,36 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (intent === "save_assignments") {
     const weekStart = formData.get("weekStart");
-    const rawIds = formData.get("collectionIds");
-    if (
-      typeof weekStart !== "string" ||
-      typeof rawIds !== "string" ||
-      !bundleVariantId
-    ) {
+    const rawId = formData.get("collectionId");
+    if (typeof weekStart !== "string" || !bundleVariantId) {
       return json({ error: "Invalid payload" }, { status: 400 });
     }
-    const collectionIds = rawIds ? rawIds.split(",").filter(Boolean) : [];
-    saveWeekAssignments(bundleVariantId, weekStart, collectionIds);
+    const collectionId =
+      typeof rawId === "string" && rawId.trim() !== "" ? rawId.trim() : null;
+
+    const bundleProductId = await resolveBundleProductId(bundleVariantId);
+    if (bundleProductId == null) {
+      return json({ error: "Could not resolve bundle product for the selected variant" }, { status: 400 });
+    }
+
+    try {
+      await syncWeekAssignments({
+        bundleProductId,
+        weekStart,
+        weekEnd: weekEndFor(weekStart),
+        desiredCollectionId: collectionId,
+      });
+    } catch (err) {
+      const message =
+        err instanceof PresetScheduleApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to save assignments";
+      const status = err instanceof PresetScheduleApiError ? err.status : 500;
+      return json({ error: message }, { status });
+    }
+
     return json({ success: true, intent: "save_assignments" as const, weekStart });
   }
 
@@ -239,8 +286,18 @@ export async function action({ request }: ActionFunctionArgs) {
     const { targetQuantity } = getWeeklyConfig(bundleVariantId, weekStart);
 
     try {
-      const collectionIds = getWeekAssignments(bundleVariantId, weekStart);
-      if (!collectionIds || collectionIds.length === 0) {
+      const bundleProductId = await resolveBundleProductId(bundleVariantId);
+      if (bundleProductId == null) {
+        return json(
+          { error: "Could not resolve bundle product for the selected variant" },
+          { status: 400 }
+        );
+      }
+      const presetRows = await listPresetSchedules({ bundleProductId });
+      const collectionIds = presetRows
+        .filter((row) => row.start_date === weekStart)
+        .map((row) => row.external_collection_id);
+      if (collectionIds.length === 0) {
         return json(
           { error: "No collections assigned for this week. Assign collections before applying defaults." },
           { status: 400 }
@@ -486,7 +543,7 @@ export default function MerchantPage() {
                     bundleVariantId={currentBundleVariantId}
                     weekStart={week}
                     allCollections={allCollections}
-                    assignedIds={assignedPerWeek[week] ?? []}
+                    assignedId={assignedPerWeek[week] ?? null}
                   />
                 ) : null
               )}
@@ -798,15 +855,19 @@ function AssignPanel({
   bundleVariantId,
   weekStart,
   allCollections,
-  assignedIds,
+  assignedId,
 }: {
   bundleVariantId: string;
   weekStart: string;
   allCollections: SimpleCollection[];
-  assignedIds: string[];
+  assignedId: string | null;
 }) {
   const fetcher = useFetcher<typeof action>();
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(assignedIds));
+  const [selected, setSelected] = useState<string | null>(assignedId);
+
+  useEffect(() => {
+    setSelected(assignedId);
+  }, [assignedId]);
 
   const isSaving = fetcher.state !== "idle";
   const fetcherData = fetcher.data as
@@ -819,21 +880,13 @@ function AssignPanel({
       ? (fetcherData as { error: string }).error
       : null;
 
-  const hasChanges =
-    selected.size !== assignedIds.length ||
-    [...selected].some((id) => !assignedIds.includes(id));
+  const hasChanges = selected !== assignedId;
 
-  const toggle = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const choose = (id: string) => {
+    setSelected((prev) => (prev === id ? null : id));
   };
 
-  const selectAll = () => setSelected(new Set(allCollections.map((c) => c.id)));
-  const deselectAll = () => setSelected(new Set());
+  const clear = () => setSelected(null);
 
   const handleSave = () => {
     fetcher.submit(
@@ -841,7 +894,7 @@ function AssignPanel({
         intent: "save_assignments",
         bundleVariantId,
         weekStart,
-        collectionIds: [...selected].join(","),
+        collectionId: selected ?? "",
       },
       { method: "post" }
     );
@@ -862,7 +915,7 @@ function AssignPanel({
               Week of {formatWeekRangeLabel(weekStart)}
             </h2>
             <p className="text-sm text-gray-400 mt-0.5">
-              {selected.size} of {allCollections.length} collection{allCollections.length !== 1 ? "s" : ""} assigned
+              {selected ? "1 collection assigned" : "No collection assigned"}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -878,17 +931,11 @@ function AssignPanel({
         </div>
         <div className="mt-2 flex items-center gap-2">
           <button
-            onClick={selectAll}
-            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+            onClick={clear}
+            disabled={selected == null}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Select all
-          </button>
-          <span className="text-gray-300">|</span>
-          <button
-            onClick={deselectAll}
-            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
-          >
-            Deselect all
+            Clear selection
           </button>
         </div>
       </div>
@@ -900,7 +947,7 @@ function AssignPanel({
       ) : (
         <div className="divide-y divide-gray-50">
           {allCollections.map((collection) => {
-            const isSelected = selected.has(collection.id);
+            const isSelected = selected === collection.id;
             return (
               <label
                 key={collection.id}
@@ -909,10 +956,11 @@ function AssignPanel({
                 }`}
               >
                 <input
-                  type="checkbox"
+                  type="radio"
+                  name={`assign-${weekStart}`}
                   checked={isSelected}
-                  onChange={() => toggle(collection.id)}
-                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 flex-none"
+                  onChange={() => choose(collection.id)}
+                  className="w-4 h-4 border-gray-300 text-indigo-600 focus:ring-indigo-500 flex-none"
                 />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-800">{collection.title}</p>

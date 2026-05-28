@@ -9,6 +9,7 @@ import {
   CreditSummarySchema,
   AddressSchema,
   PaymentMethodSchema,
+  PlanSchema,
   type Customer,
   type Subscription,
   type Charge,
@@ -19,6 +20,7 @@ import {
   type CreditSummary,
   type Address,
   type PaymentMethod,
+  type Plan,
   type Property,
 } from "./types";
 import { getCollectionProducts, getCollectionProductsSorted } from "./shopify.server";
@@ -385,6 +387,21 @@ export async function listBundleSubscriptionIds(externalVariantIds: string[]): P
     z.array(z.object({ id: z.number() })).parse(response.subscriptions)
   );
   return new Set(subs.map((s) => s.id));
+}
+
+// ─── Plans ────────────────────────────────────────────────────────────────────
+
+export async function listPlans(args: {
+  externalVariantId?: string;
+  externalProductId?: string;
+  limit?: number;
+}): Promise<Plan[]> {
+  const params = new URLSearchParams();
+  if (args.externalVariantId) params.set("external_variant_id", args.externalVariantId);
+  if (args.externalProductId) params.set("external_product_id", args.externalProductId);
+  params.set("limit", String(args.limit ?? 50));
+  const data = await api<{ plans: unknown[] }>(`/plans?${params.toString()}`);
+  return z.array(PlanSchema).parse(data.plans);
 }
 
 export async function listQueuedChargesForWeek(weekStart: string): Promise<Charge[]> {

@@ -106,13 +106,22 @@ export function saveWeeklyConfig(
   writeStore(store);
 }
 
-export function getUpcomingWeekStarts(): string[] {
-  const today = new Date();
-  const day = today.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-  // If today is Monday, target next Monday (+7); otherwise target the coming Monday
-  const daysUntil = day === 0 ? 1 : day === 1 ? 7 : 8 - day;
+// Build the next `count` week-start dates (YYYY-MM-DD), where each week starts on
+// `startDayJs` (JS Date.getDay() convention: 0=Sun..6=Sat). If today is the start
+// day, the first returned date is *next* week. Defaults to (Monday, 4 weeks).
+export function getUpcomingWeekStarts(
+  startDayJs: number = 1,
+  count: number = 4
+): string[] {
+  const start = ((Math.trunc(startDayJs) % 7) + 7) % 7;
 
-  return Array.from({ length: 4 }, (_, i) => {
+  const today = new Date();
+  const day = today.getDay();
+
+  const diff = (start - day + 7) % 7;
+  const daysUntil = diff === 0 ? 7 : diff;
+
+  return Array.from({ length: count }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + daysUntil + i * 7);
     const year = d.getFullYear();

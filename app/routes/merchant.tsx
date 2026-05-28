@@ -21,6 +21,7 @@ import {
   getBundleSelections,
   listBundleProducts,
   listBundleSubscriptionIds,
+  listPlans,
   listQueuedChargesForWeek,
   updateBundleSelection,
 } from "~/lib/recharge.server";
@@ -82,7 +83,6 @@ type BundleVariantOption = {
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const requestedBundleVariantId = url.searchParams.get("bundle");
-  const weekStarts = getUpcomingWeekStarts();
 
   const [shopifyCollections, bundleProducts] = await Promise.all([
     listBundleCollections(),
@@ -120,6 +120,37 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ? bundleVariantOptions.find((opt) => opt.externalVariantId === currentBundleVariantId)?.bundleProductId
       ?? null
     : null;
+
+  const currentExternalProductId = currentBundleVariantId
+    ? bundleVariantOptions.find((opt) => opt.externalVariantId === currentBundleVariantId)
+        ?.externalProductId ?? null
+    : null;
+
+  // Plan field is MySQL WEEKDAY (0=Mon..6=Sun). JS getDay is (0=Sun..6=Sat),
+  // so convert with (n + 1) % 7. Fallback to Monday when the plan or field is missing.
+  let chargeCreationDayOfWeek: number | null = null;
+  let weekStartDayJs = 1;
+  let plansError: string | null = null;
+
+  if (currentBundleVariantId) {
+    try {
+      let plans = await listPlans({ externalVariantId: currentBundleVariantId });
+      if (plans.length === 0 && currentExternalProductId) {
+        plans = await listPlans({ externalProductId: currentExternalProductId });
+      }
+      const planWithDay = plans.find(
+        (p) => typeof p.charge_creation_day_of_week === "number"
+      );
+      if (planWithDay && typeof planWithDay.charge_creation_day_of_week === "number") {
+        chargeCreationDayOfWeek = planWithDay.charge_creation_day_of_week;
+        weekStartDayJs = (chargeCreationDayOfWeek + 1) % 7;
+      }
+    } catch (err) {
+      plansError = err instanceof Error ? err.message : "Failed to load plan";
+    }
+  }
+
+  const weekStarts = getUpcomingWeekStarts(weekStartDayJs, 12);
 
   let allAssignments: Record<string, string | null> = {};
   let presetSchedulesError: string | null = null;
@@ -177,6 +208,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return json({
     weekStarts,
+    weekStartDayJs,
+    chargeCreationDayOfWeek,
     bundleVariantOptions,
     currentBundleVariantId,
     currentBundleProductId,
@@ -189,6 +222,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     modificationWindowDays,
     addonCollectionIds,
     presetSchedulesError,
+    plansError,
   });
 }
 
@@ -416,6 +450,7 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function MerchantPage() {
   const {
     weekStarts,
+    weekStartDayJs,
     bundleVariantOptions,
     currentBundleVariantId,
     allCollections,
@@ -425,9 +460,16 @@ export default function MerchantPage() {
     deliveryDateOffset,
     modificationWindowDays,
     addonCollectionIds,
+    plansError,
   } = useLoaderData<typeof loader>();
   const [activeWeek, setActiveWeek] = useState(weekStarts[0]);
   const [activeView, setActiveView] = useState<ViewMode>("assign");
+
+  useEffect(() => {
+    if (!weekStarts.includes(activeWeek)) {
+      setActiveWeek(weekStarts[0]);
+    }
+  }, [weekStarts, activeWeek]);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -463,6 +505,14 @@ export default function MerchantPage() {
           bundleVariantOptions={bundleVariantOptions}
           currentBundleVariantId={currentBundleVariantId}
         />
+
+        {plansError && (
+          <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
+            <p className="text-sm text-amber-800">
+              Couldn&apos;t load the bundle&apos;s plan ({plansError}). Defaulting weeks to Monday-start.
+            </p>
+          </div>
+        )}
 
         {currentBundleVariantId == null ? (
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4">
@@ -515,22 +565,26 @@ export default function MerchantPage() {
               </button>
             </div>
 
-            {/* Week tabs (hidden for addons view since collections are global) */}
+            {/* Week dropdown (hidden for addons view since collections are global) */}
             {activeView !== "addons" && (
-              <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
-                {weekStarts.map((week) => (
-                  <button
-                    key={week}
-                    onClick={() => setActiveWeek(week)}
-                    className={`flex-1 text-sm font-medium py-1.5 px-2 rounded-lg transition-colors ${
-                      activeWeek === week
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-500 hover:text-gray-800"
-                    }`}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-4">
+                <label className="block">
+                  <span className="text-sm font-semibold text-gray-900">Week</span>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Schedules start on {weekStartDayName(weekStartDayJs)}, the same day that charge creation occurs.
+                  </p>
+                  <select
+                    value={activeWeek}
+                    onChange={(e) => setActiveWeek(e.target.value)}
+                    className="mt-3 w-full text-sm font-medium text-gray-900 bg-gray-100 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   >
-                    {formatTabLabel(week)}
-                  </button>
-                ))}
+                    {weekStarts.map((week) => (
+                      <option key={week} value={week}>
+                        Week of {formatWeekRangeLabel(week)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             )}
 
@@ -830,9 +884,19 @@ function ModificationWindowPanel({
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
-function formatTabLabel(weekStart: string): string {
-  const d = new Date(weekStart + "T00:00:00");
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const DAY_NAMES_JS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+function weekStartDayName(startDayJs: number): string {
+  const idx = ((Math.trunc(startDayJs) % 7) + 7) % 7;
+  return DAY_NAMES_JS[idx];
 }
 
 function formatWeekRangeLabel(weekStart: string): string {

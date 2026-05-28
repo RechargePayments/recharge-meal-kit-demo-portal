@@ -286,6 +286,28 @@ export const PaymentMethodSchema = z.object({
 
 export type PaymentMethod = z.infer<typeof PaymentMethodSchema>;
 
+// ─── Plan ─────────────────────────────────────────────────────────────────────
+
+export const PlanSchema = z.object({
+  id: z.number(),
+  external_product_id: z
+    .object({ ecommerce: z.string().nullable().optional() })
+    .nullable()
+    .optional(),
+  external_variant_ids: z.array(z.string()).nullable().optional(),
+  external_plan_id: z.string().nullable().optional(),
+  title: z.string().nullable().optional(),
+  type: z.string().nullable().optional(),
+  interval_unit: z.enum(["day", "week", "month"]).nullable().optional(),
+  order_interval_frequency: z.number().nullable().optional(),
+  charge_interval_frequency: z.number().nullable().optional(),
+  max_queued_charges: z.number().nullable().optional(),
+  charge_creation_day_of_week: z.number().int().min(0).max(6).nullable().optional(),
+  charge_creation_day_of_month: z.number().int().min(1).max(31).nullable().optional(),
+});
+
+export type Plan = z.infer<typeof PlanSchema>;
+
 // ─── API update payload ───────────────────────────────────────────────────────
 
 export type BundleItemPayload = Pick<

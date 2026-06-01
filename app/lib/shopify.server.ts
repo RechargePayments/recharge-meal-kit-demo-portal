@@ -45,6 +45,24 @@ async function shopifyFetch<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function shopifyMutate<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+  const token = await getAccessToken();
+  const domain = process.env.SHOPIFY_STORE_DOMAIN!;
+  const res = await fetch(`https://${domain}/admin/api/2025-01${path}`, {
+    method,
+    headers: {
+      "X-Shopify-Access-Token": token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Shopify ${res.status} — ${method} ${path}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 const ShopifyVariantSchema = z.object({
   id: z.number(),
   title: z.string(),
@@ -75,10 +93,21 @@ export async function getCollectionProducts(collectionId: string): Promise<Shopi
 export async function getCollectionCollects(
   collectionId: string
 ): Promise<Map<number, number>> {
-  const data = await shopifyFetch<{
-    collects: Array<{ product_id: number; position: number }>;
-  }>(`/collects.json?collection_id=${collectionId}&fields=product_id,position&limit=250`);
-  return new Map(data.collects.map((c) => [c.product_id, c.position]));
+  try {
+    const data = await shopifyFetch<{
+      collects: Array<{ product_id: number; position: number }>;
+    }>(`/collects.json?collection_id=${collectionId}&fields=product_id,position&limit=250`);
+    return new Map(data.collects.map((c) => [c.product_id, c.position]));
+  } catch (err) {
+    // A deleted/unknown collection makes the collects endpoint 404 (unlike
+    // products.json, which returns an empty list). Treat it as "no manual sort
+    // positions" so a stale collection id falls back to unsorted instead of
+    // failing the whole request.
+    if (err instanceof Error && /^Shopify 404\b/.test(err.message)) {
+      return new Map();
+    }
+    throw err;
+  }
 }
 
 export async function getCollectionProductsSorted(
@@ -107,4 +136,30 @@ export async function listBundleCollections(): Promise<ShopifyCollection[]> {
   );
   const collections = z.array(ShopifyCollectionSchema).parse(data.custom_collections);
   return collections;
+}
+
+// ─── Customer tags ──────────────────────────────────────────────────────────
+// Shopify stores customer tags as a single comma-separated string. These helpers
+// expose them as a normalized string array and are the storage layer for
+// dietary preferences (see customer-preferences.server.ts).
+
+function parseTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+export async function getCustomerTags(shopifyCustomerId: string): Promise<string[]> {
+  const data = await shopifyFetch<{ customer: { id: number; tags?: string | null } }>(
+    `/customers/${shopifyCustomerId}.json?fields=id,tags`
+  );
+  return parseTags(data.customer.tags);
+}
+
+export async function setCustomerTags(shopifyCustomerId: string, tags: string[]): Promise<void> {
+  await shopifyMutate(`/customers/${shopifyCustomerId}.json`, "PUT", {
+    customer: { id: Number(shopifyCustomerId), tags: tags.join(", ") },
+  });
 }

@@ -22,7 +22,6 @@ import {
   unskipCharge,
   updateAddress,
   updateBundleSelection,
-  updateSubscriptionProperties,
 } from "~/lib/recharge.server";
 import { requireCustomerOwnsId } from "~/lib/auth.server";
 import { listPresetSchedules } from "~/lib/preset-schedules.server";
@@ -35,7 +34,7 @@ import {
 } from "~/lib/merchant-settings.server";
 import { getAddonCollectionIds } from "~/lib/addon-collections.server";
 import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW, LEGACY_BUNDLE_VARIANT_ID } from "~/lib/bundle-config";
-import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Property, Subscription } from "~/lib/types";
+import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
@@ -97,15 +96,18 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const selectedWeek = url.searchParams.get("week");
   const selectedSubscription = url.searchParams.get("subscription");
 
-  // Phase 1: Light data — Recharge only, no Shopify calls
-  const [customer, subscriptions, activeCharges, customerPreferences, creditSummary, addresses] = await Promise.all([
+  // Phase 1: Light data — Recharge only
+  const [customer, subscriptions, activeCharges, creditSummary, addresses] = await Promise.all([
     getCustomer(customerId),
     listSubscriptions(customerId),
     listActiveCharges(customerId),
-    Promise.resolve(getCustomerPreferences(customerId)),
     getCreditSummary(customerId).catch(() => null),
     listAddresses(customerId),
   ]);
+
+  // Exclusion preferences live on the Shopify customer; derive them from the
+  // already-loaded Recharge customer to avoid a second customer fetch.
+  const customerPreferences = await getCustomerPreferences(customer).catch(() => null);
 
   // Phase 2: Check which charges have bundles (Recharge API only)
   const subscriptionPurchaseItemIds = [
@@ -481,22 +483,13 @@ export async function action({ params, request }: ActionFunctionArgs) {
 
   if (intent === "update_preferences") {
     const customerId = formData.get("customerId");
-    const rawInclude = formData.getAll("include");
     const rawExclude = formData.getAll("exclude");
     if (typeof customerId !== "string") {
       return json({ error: "Missing customerId" }, { status: 400 });
     }
-    const include = rawInclude.filter((v): v is string => typeof v === "string");
     const exclude = rawExclude.filter((v): v is string => typeof v === "string");
 
-    saveCustomerPreferences(customerId, { include, exclude });
-
-    const properties: Property[] = [
-      { name: "meal_type_preference", value: JSON.stringify(include) },
-      { name: "ingredient_exclusion", value: JSON.stringify(exclude) },
-    ];
-    const subs = await listSubscriptions(customerId);
-    await Promise.all(subs.map((sub) => updateSubscriptionProperties(sub.id, properties)));
+    await saveCustomerPreferences(customerId, exclude);
 
     return json({ success: true, intent: "update_preferences" } as const);
   }
@@ -1229,8 +1222,7 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
 
 // ─── Dashboard info bar (compact banners) ─────────────────────────────────────
 
-const MEAL_TYPE_OPTIONS = ["Gluten Free", "Vegetarian"];
-const EXCLUSION_OPTIONS = ["Dairy", "Wheat", "Meat", "Fish"];
+const EXCLUSION_OPTIONS = ["Dairy", "Wheat", "Meat", "Fish", "Eggs"];
 
 function DashboardInfoBar({
   subscriptions,
@@ -1247,7 +1239,6 @@ function DashboardInfoBar({
 }) {
   const fetcher = useFetcher();
   const [editing, setEditing] = useState(false);
-  const [selectedIncludes, setSelectedIncludes] = useState<string[]>(preferences?.include ?? []);
   const [selectedExcludes, setSelectedExcludes] = useState<string[]>(preferences?.exclude ?? []);
 
   const isSaving = fetcher.state !== "idle";
@@ -1259,16 +1250,13 @@ function DashboardInfoBar({
   }, [fetcher.state, fetcher.data]);
 
   useEffect(() => {
-    setSelectedIncludes(preferences?.include ?? []);
     setSelectedExcludes(preferences?.exclude ?? []);
   }, [preferences]);
 
-  const toggleInclude = (tag: string) =>
-    setSelectedIncludes((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
   const toggleExclude = (tag: string) =>
     setSelectedExcludes((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
 
-  const hasPrefs = preferences && (preferences.include.length > 0 || preferences.exclude.length > 0);
+  const hasPrefs = Boolean(preferences && preferences.exclude.length > 0);
 
   const activeSub = subscriptions.find((s) => s.status === "active") ?? subscriptions[0];
   const chargeDate = activeSub?.next_charge_scheduled_at;
@@ -1323,7 +1311,7 @@ function DashboardInfoBar({
             <div className="flex items-center gap-1.5 min-w-0 flex-1">
               {hasPrefs ? (
                 <span className="text-sm text-stone-600 truncate">
-                  {[...preferences!.include, ...preferences!.exclude.map((t) => `No ${t}`)].join(", ")}
+                  {preferences!.exclude.map((t) => `No ${t}`).join(", ")}
                 </span>
               ) : (
                 <span className="text-sm text-stone-400">No preferences set</span>
@@ -1347,34 +1335,6 @@ function DashboardInfoBar({
           </div>
 
           <div className="space-y-4">
-            <div>
-              <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Meal Types I Prefer</h4>
-              <div className="flex flex-wrap gap-2">
-                {MEAL_TYPE_OPTIONS.map((tag) => {
-                  const active = selectedIncludes.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => toggleInclude(tag)}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
-                        active
-                          ? "bg-brand-50 text-brand-700 border-brand-300 ring-1 ring-brand-200"
-                          : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
-                      }`}
-                    >
-                      {active && (
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                        </svg>
-                      )}
-                      {tag}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
             <div>
               <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Ingredients to Avoid</h4>
               <div className="flex flex-wrap gap-2">
@@ -1412,7 +1372,6 @@ function DashboardInfoBar({
                 const formData = new FormData();
                 formData.set("intent", "update_preferences");
                 formData.set("customerId", customerId);
-                for (const tag of selectedIncludes) formData.append("include", tag);
                 for (const tag of selectedExcludes) formData.append("exclude", tag);
                 fetcher.submit(formData, { method: "post" });
               }}
@@ -1435,7 +1394,6 @@ function DashboardInfoBar({
               type="button"
               disabled={isSaving}
               onClick={() => {
-                setSelectedIncludes(preferences?.include ?? []);
                 setSelectedExcludes(preferences?.exclude ?? []);
                 setEditing(false);
               }}
@@ -1773,10 +1731,8 @@ function matchesTags(itemTags: string[], prefTags: string[]): boolean {
 
 function tierOf(item: EditableItem, preferences: CustomerPreference | null): number {
   if (item.quantity > 0) return 0;
-  if (!preferences) return 1;
-  if (matchesTags(item.tags, preferences.exclude)) return 3;
-  if (matchesTags(item.tags, preferences.include)) return 1;
-  return 2;
+  if (preferences && matchesTags(item.tags, preferences.exclude)) return 3;
+  return 1;
 }
 
 function buildEditableItems(
@@ -2025,7 +1981,6 @@ function MealGrid({
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         {items.map((item, index) => {
           const isSelected = item.quantity > 0;
-          const isPrefMatch = preferences && matchesTags(item.tags, preferences.include);
           const isPrefExclude = preferences && matchesTags(item.tags, preferences.exclude);
 
           return (
@@ -2068,17 +2023,7 @@ function MealGrid({
                   </div>
                 )}
 
-                {/* Preference badges */}
-                {isPrefMatch && !isSelected && (
-                  <div className="absolute top-2 left-2">
-                    <span className="badge text-white text-[10px]" style={{ backgroundColor: "#22c55e", boxShadow: "0 1px 3px rgba(28,25,23,0.06)" }}>
-                      <svg className="w-2.5 h-2.5" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                      </svg>
-                      Match
-                    </span>
-                  </div>
-                )}
+                {/* Preference badge */}
                 {isPrefExclude && (
                   <div className="absolute top-2 left-2">
                     <span className="badge bg-amber-500 text-white text-[10px] shadow-warm-sm">Avoid</span>

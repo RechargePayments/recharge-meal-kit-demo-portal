@@ -8,9 +8,7 @@ import {
   getWeeklyConfig,
   saveWeeklyConfig,
 } from "~/lib/bundle-defaults.server";
-import {
-  getAllCustomerPreferences,
-} from "~/lib/customer-preferences.server";
+import { getCustomerPreferencesById } from "~/lib/customer-preferences.server";
 import {
   computePersonalizedSelection,
   type SortedProduct,
@@ -338,9 +336,8 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      const [bundleCollections, allPreferences, bundleSubIds, charges] = await Promise.all([
+      const [bundleCollections, bundleSubIds, charges] = await Promise.all([
         getBundleCollectionsFromShopify(collectionIds, { sorted: true }),
-        Promise.resolve(getAllCustomerPreferences()),
         listBundleSubscriptionIds([bundleVariantId]),
         listQueuedChargesForWeek(weekStart),
       ]);
@@ -370,7 +367,9 @@ export async function action({ request }: ActionFunctionArgs) {
             (li) => bundleSubIds.has(li.purchase_item_id)
           )!.purchase_item_id;
           const customerId = charge.customer?.id ? String(charge.customer.id) : null;
-          const preferences = customerId ? (allPreferences[customerId] ?? null) : null;
+          const preferences = customerId
+            ? await getCustomerPreferencesById(customerId).catch(() => null)
+            : null;
           const items = computePersonalizedSelection(sortedProducts, targetQuantity, preferences);
 
           try {
@@ -1263,7 +1262,7 @@ function WeekPanel({
       <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
         <p className="text-xs text-gray-400">
           Priority order is controlled by collection sort order in Shopify admin.
-          Items matching a customer's excluded ingredients will be skipped; preferred items are boosted to the top.
+          Items matching a customer&rsquo;s excluded ingredients (their <code>rc_exclude_*</code> Shopify tags) will be skipped.
         </p>
       </div>
 

@@ -18,8 +18,7 @@ function matchesTags(itemTags: string[], prefTags: string[]): boolean {
  * Build a personalized bundle selection from a priority-sorted product list.
  *
  * 1. Hard-exclude products matching the customer's exclude tags
- * 2. Boost products matching include tags to the front (stable order)
- * 3. Take the first `targetQuantity` items, each with quantity 1
+ * 2. Take the first `targetQuantity` items, each with quantity 1
  */
 export function computePersonalizedSelection(
   sortedProducts: SortedProduct[],
@@ -28,25 +27,8 @@ export function computePersonalizedSelection(
 ): BundleItemPayload[] {
   let candidates = sortedProducts;
 
-  if (preferences) {
-    if (preferences.exclude.length > 0) {
-      candidates = candidates.filter(
-        (p) => !matchesTags(p.tags, preferences.exclude)
-      );
-    }
-
-    if (preferences.include.length > 0) {
-      const included: SortedProduct[] = [];
-      const neutral: SortedProduct[] = [];
-      for (const p of candidates) {
-        if (matchesTags(p.tags, preferences.include)) {
-          included.push(p);
-        } else {
-          neutral.push(p);
-        }
-      }
-      candidates = [...included, ...neutral];
-    }
+  if (preferences && preferences.exclude.length > 0) {
+    candidates = candidates.filter((p) => !matchesTags(p.tags, preferences.exclude));
   }
 
   return candidates.slice(0, targetQuantity).map((p) => ({

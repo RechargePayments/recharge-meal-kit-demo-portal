@@ -152,12 +152,7 @@ The `data/` folder contains JSON files with IDs from the previously connected st
 1. Open the `data/` folder in the project
 2. Replace the contents of each file with its empty/default state:
 
-**`data/customer-preferences.json`** — replace with:
-```json
-{
-  "preferences": {}
-}
-```
+> Customer dietary preferences are no longer stored in `data/`. They live on each Shopify customer as `rc_exclude_*` tags, so there is nothing to reset here — clearing the store's customers (or their tags) in Shopify is sufficient.
 
 **`data/bundle-defaults.json`** — replace with:
 ```json
@@ -307,7 +302,7 @@ The portal stores merchant configuration as JSON files on disk (`data/*.json`). 
 4. **Attach a persistent volume** for the `data/` folder:
    - Go to your service → **Settings → Volumes**
    - Create a volume and set the mount path to `/app/data`
-   - This ensures your merchant config and customer preferences survive deploys and restarts
+   - This ensures your merchant config (week assignments, bundle defaults, settings) survives deploys and restarts
 
 5. **Verify build and start commands** — Railway auto-detects Node.js projects, but confirm these are set:
    - **Build command:** `npm install && npm run build`
@@ -352,170 +347,31 @@ Once the portal is running on a platform, you can put it on your own domain (e.g
 
 ---
 
-## Production Ready: Migrate Customer Preferences to SQLite
+## Customer Dietary Preferences (Shopify Customer Tags)
 
-The portal stores customer dietary preferences (include/exclude tags) in `data/customer-preferences.json`. This works fine for demos, but for a store with hundreds or thousands of customers it has problems:
+Customer dietary preferences are **exclude-only** and stored as **Shopify customer tags** — there is no local database or JSON file for them. Each excluded ingredient is a tag of the form `rc_exclude_<ingredient>`:
 
-- **Race conditions** — two customers saving at the same time can overwrite each other's data
-- **Performance** — every save reads and re-writes the entire file
-- **No querying** — you can't easily answer questions like "how many customers exclude Dairy?"
+| Customer tag | Meaning |
+|--------------|---------|
+| `rc_exclude_eggs` | Skip any product tagged `eggs` |
+| `rc_exclude_dairy` | Skip any product tagged `dairy` |
+| `rc_exclude_gluten_free` | Skip any product tagged `gluten free` |
 
-The fix is to move customer preferences into a SQLite database. SQLite is a single-file database that requires no external server — it's the simplest possible upgrade from JSON files.
+The slug after the prefix is matched case-insensitively against Shopify **product** tags (underscores map to spaces). Positive "preferred" preferences are intentionally not modeled — only exclusions.
 
-> **The other `data/*.json` files** (merchant settings, week assignments, bundle defaults, addon collections) are merchant-level config that stays small regardless of customer count. You don't need to migrate those.
+### How it works
 
-### 1. Install `better-sqlite3`
+- `app/lib/customer-preferences.server.ts` is the single integration point. It resolves the Shopify customer from the Recharge customer's `external_customer_id.ecommerce`, then reads/writes tags via `getCustomerTags` / `setCustomerTags` in `app/lib/shopify.server.ts`.
+- On save, existing non-`rc_exclude_*` tags are preserved; only the exclusion tags are replaced.
+- The subscriber portal edits these tags ("Ingredients to Avoid"), and the merchant "apply defaults" flow filters out matching products via `computePersonalizedSelection`.
 
-```bash
-npm install better-sqlite3
-npm install -D @types/better-sqlite3
-```
+### Required Shopify scopes
 
-### 2. Create the Database Module
+The Shopify Admin API token (client-credentials app) must have:
 
-Create a new file at `app/lib/db.server.ts`:
+- `read_customers`, `write_customers` — read and update customer tags
+- `read_products` — read product tags for bundle collections
 
-```typescript
-import Database from "better-sqlite3";
-import { join } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+### Why no migration step
 
-const DATA_DIR = join(process.cwd(), "data");
-if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-
-const db = new Database(join(DATA_DIR, "portal.db"));
-
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS customer_preferences (
-    customer_id TEXT PRIMARY KEY,
-    include_tags TEXT NOT NULL DEFAULT '[]',
-    exclude_tags TEXT NOT NULL DEFAULT '[]'
-  )
-`);
-
-export default db;
-```
-
-The database file (`data/portal.db`) lives in the same `data/` folder as your JSON files. `WAL` mode allows concurrent reads without blocking.
-
-### 3. Replace `customer-preferences.server.ts`
-
-Replace the contents of `app/lib/customer-preferences.server.ts` with:
-
-```typescript
-import db from "./db.server";
-
-export type CustomerPreference = { include: string[]; exclude: string[] };
-
-const getStmt = db.prepare(
-  "SELECT include_tags, exclude_tags FROM customer_preferences WHERE customer_id = ?"
-);
-const upsertStmt = db.prepare(`
-  INSERT INTO customer_preferences (customer_id, include_tags, exclude_tags)
-  VALUES (?, ?, ?)
-  ON CONFLICT(customer_id) DO UPDATE SET include_tags = excluded.include_tags,
-                                          exclude_tags = excluded.exclude_tags
-`);
-const allStmt = db.prepare("SELECT customer_id, include_tags, exclude_tags FROM customer_preferences");
-
-export function getCustomerPreferences(customerId: string | null): CustomerPreference | null {
-  if (!customerId) return null;
-  const row = getStmt.get(customerId) as { include_tags: string; exclude_tags: string } | undefined;
-  if (!row) return null;
-  return { include: JSON.parse(row.include_tags), exclude: JSON.parse(row.exclude_tags) };
-}
-
-export function getAllCustomerPreferences(): Record<string, CustomerPreference> {
-  const rows = allStmt.all() as { customer_id: string; include_tags: string; exclude_tags: string }[];
-  const result: Record<string, CustomerPreference> = {};
-  for (const row of rows) {
-    result[row.customer_id] = { include: JSON.parse(row.include_tags), exclude: JSON.parse(row.exclude_tags) };
-  }
-  return result;
-}
-
-export function saveCustomerPreferences(customerId: string, preferences: CustomerPreference): void {
-  upsertStmt.run(customerId, JSON.stringify(preferences.include), JSON.stringify(preferences.exclude));
-}
-```
-
-The exported function signatures are identical to the original, so **no other files need to change**.
-
-### 4. Migrate Existing Data
-
-If you have existing preferences in `customer-preferences.json`, run this one-time migration. Create a file called `migrate-preferences.ts` in the project root:
-
-```typescript
-import Database from "better-sqlite3";
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-
-const JSON_PATH = join(process.cwd(), "data", "customer-preferences.json");
-const DB_PATH = join(process.cwd(), "data", "portal.db");
-
-if (!existsSync(JSON_PATH)) {
-  console.log("No customer-preferences.json found — nothing to migrate.");
-  process.exit(0);
-}
-
-const raw = JSON.parse(readFileSync(JSON_PATH, "utf-8"));
-const preferences: Record<string, { include: string[]; exclude: string[] }> = raw.preferences ?? {};
-const entries = Object.entries(preferences);
-
-if (entries.length === 0) {
-  console.log("No preferences to migrate.");
-  process.exit(0);
-}
-
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS customer_preferences (
-    customer_id TEXT PRIMARY KEY,
-    include_tags TEXT NOT NULL DEFAULT '[]',
-    exclude_tags TEXT NOT NULL DEFAULT '[]'
-  )
-`);
-
-const upsert = db.prepare(`
-  INSERT INTO customer_preferences (customer_id, include_tags, exclude_tags)
-  VALUES (?, ?, ?)
-  ON CONFLICT(customer_id) DO UPDATE SET include_tags = excluded.include_tags,
-                                          exclude_tags = excluded.exclude_tags
-`);
-
-const insertAll = db.transaction(() => {
-  for (const [customerId, pref] of entries) {
-    upsert.run(customerId, JSON.stringify(pref.include), JSON.stringify(pref.exclude));
-  }
-});
-
-insertAll();
-console.log(`Migrated ${entries.length} customer preference(s) to SQLite.`);
-db.close();
-```
-
-Run it with:
-
-```bash
-npx tsx migrate-preferences.ts
-```
-
-After verifying the app works with the database, you can safely delete `data/customer-preferences.json` and `migrate-preferences.ts`.
-
-### 5. Update `.gitignore`
-
-Add the database file so it isn't committed:
-
-```
-data/portal.db
-data/portal.db-wal
-data/portal.db-shm
-```
-
-### 6. Hosting Note
-
-If you're deploying to a platform with persistent volumes (see the hosting section above), make sure the volume is mounted at the `data/` directory. The SQLite database file (`portal.db`) will live alongside your merchant config JSON files.
+Because preferences live in Shopify, they survive deploys and restarts and scale with the store automatically — no persistent volume, SQLite database, or data migration is needed. Clearing preferences means removing the `rc_exclude_*` tags from customers in Shopify.

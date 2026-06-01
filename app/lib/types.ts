@@ -11,6 +11,12 @@ export const CustomerSchema = z.object({
   has_payment_method_in_dunning: z.boolean(),
   subscriptions_active_count: z.number(),
   subscriptions_total_count: z.number(),
+  // Links the Recharge customer to its underlying Shopify customer; `ecommerce`
+  // is the Shopify customer id used to read/write dietary preference tags.
+  external_customer_id: z
+    .object({ ecommerce: z.string().nullable().optional() })
+    .nullable()
+    .optional(),
 });
 
 export type Customer = z.infer<typeof CustomerSchema>;

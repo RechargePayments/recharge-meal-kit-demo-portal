@@ -1,6 +1,6 @@
 # Future Charge Manipulation Demo Portal
 
-A standalone customer portal demonstrating the **future charege manipulation** feature to merchant partners. It is a reference implementation of what a merchant would build against the Recharge API directly.
+A standalone customer portal demonstrating the **future charge manipulation** feature to merchant partners. It is a reference implementation of what a merchant would build against the Recharge API directly.
 
 > **Connecting your own store?** This README is the high-level overview. For the full step-by-step setup, token creation, and deployment walkthrough, see **[STORE_SETUP.md](STORE_SETUP.md)**.
 

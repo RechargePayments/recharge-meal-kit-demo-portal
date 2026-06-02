@@ -8,6 +8,11 @@ A standalone customer portal demonstrating the **future charge manipulation** fe
 
 This portal is **an example merchants can fork and follow to build their own custom customer portal**. It shows one concrete, end-to-end way to surface multiple queued charges, per-delivery bundle editing, and customer self-service on top of the Recharge API and the Shopify Admin API.
 
+It is built around two complementary surfaces:
+
+- **Merchant admin portal** (`/merchant`) — where the merchant curates what customers can choose from for each upcoming charge. The merchant picks the active bundle product, assigns Shopify collections to upcoming delivery weeks (the bundle selection schedule), sets per-week defaults, and configures the delivery-date offset, modification/lock window, and add-on collections. This is how a merchant defines the upcoming menu and the rules that govern customer choices.
+- **Customer portal** (`/login` → `/<customerId>`) — where each customer manages their own upcoming charges. After passwordless sign-in, a customer sees their queued charges grouped by delivery week and can make their selections for each charge independently: edit the bundle contents from the merchant's scheduled collections, set dietary exclusions, and skip or unskip a week — all within the modification window the merchant configured.
+
 It is a **demo / reference implementation, not a turnkey hosted product.** A merchant adopting it is expected to take the code as a starting point and run it on their own infrastructure. The portal ships with everything wired up against a single store via environment variables — there is no multi-tenant layer.
 
 ### What you provide yourself

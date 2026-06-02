@@ -1,0 +1,33 @@
+stages:
+  - test
+  - build
+  - tag
+  - deploy
+
+variables:
+  GITLAB_TOKEN: "$NPM_PUBLISH_TOKEN"
+
+include:
+  - project: "gitlab-templates/ci-templates"
+    ref: master
+    file: common.yml
+  - project: "gitlab-templates/ci-templates"
+    ref: master
+    file: kubernetes/build.yml
+  - project: "gitlab-templates/ci-templates"
+    ref: master
+    file: kubernetes/deploy.yml
+
+build:
+  extends: .build
+  stage: build
+
+push_tag:
+  extends: .push_tag
+  stage: tag
+
+deploy_stage:
+  extends: .deploy_stage
+
+deploy_ephemeral:
+  extends: .deploy_ephemeral

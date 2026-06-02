@@ -1,0 +1,14 @@
+node_modules
+build
+.cache
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.local
+Dockerfile
+.dockerignore
+README.md
+SKILLS.md
+STORE_SETUP.md

@@ -1,0 +1,95 @@
+apiVersion: skaffold/v4beta12
+kind: Config
+metadata:
+  name: ${CI_PROJECT_NAME}
+
+build:
+  tagPolicy:
+    gitCommit:
+      variant: CommitSha
+  cluster:
+    namespace: gitlab
+    volumes:
+      - name: kaniko-secret
+        secret:
+          secretName: kaniko-secret
+    annotations:
+      rechargeapps.net/ci-job-url: "${CI_JOB_URL}"
+      rechargeapps.net/ci-job-image: "${CI_JOB_IMAGE}"
+    tolerations:
+      - key: "role"
+        operator: "Equal"
+        value: "gitlab-ci"
+        effect: "NoSchedule"
+    nodeSelector:
+      role: gitlab-ci
+
+  artifacts:
+    - context: .
+      image: ${IMAGE_BASE_DOMAIN}/${CI_PROJECT_NAME}
+      kaniko:
+        dockerfile: Dockerfile
+        image: ${SKAFFOLD_KANIKO_IMAGE}
+        skipUnusedStages: true
+        useNewRun: true
+        pushRetry: "3"
+        logTimestamp: true
+        env:
+          - name: GOOGLE_APPLICATION_CREDENTIALS
+            value: /kaniko-secret/kaniko-secret.json
+        cache:
+          ttl: 336h
+        volumeMounts:
+          - name: kaniko-secret
+            mountpath: /kaniko-secret
+            readonly: true
+        registryMirror: mirror.gcr.io
+
+deploy:
+  kubeContext: ${KUBECONTEXT}
+  statusCheckDeadlineSeconds: 300
+  helm:
+    flags:
+      upgrade: &HELM_TIMEOUT [--timeout, 300s]
+      install: *HELM_TIMEOUT
+    releases:
+      - name: ${CI_PROJECT_NAME}
+        remoteChart: recharge/recharge
+        version: ${RECHARGE_CHART_VERSION}
+        namespace: default
+        createNamespace: true
+        upgradeOnChange: true
+        wait: true
+        valuesFiles:
+          - deploy/local/values.yml
+        setValueTemplates:
+          image: "${SKAFFOLD_SANITIZED_IMAGE_REF}"
+
+profiles:
+  - name: stage
+    patches:
+      - op: replace
+        path: /deploy/helm/releases/0/namespace
+        value: stage
+      - op: replace
+        path: /deploy/helm/releases/0/valuesFiles/0
+        value: deploy/stage/values.yml
+  - name: prod
+    patches:
+      - op: replace
+        path: /deploy/helm/releases/0/namespace
+        value: prod
+      - op: replace
+        path: /deploy/helm/releases/0/valuesFiles/0
+        value: deploy/prod/values.yml
+  - name: ephemeral
+    patches:
+      - op: replace
+        path: /deploy/helm/releases/0/namespace
+        value: ${CI_COMMIT_REF_SLUG}
+      - op: replace
+        path: /deploy/helm/releases/0/valuesFiles/0
+        value: deploy/ephemeral/values.yml
+      - op: replace
+        path: /deploy/helm/releases/0/name
+        value: ${CI_COMMIT_REF_SLUG}

@@ -1,0 +1,58 @@
+---
+rechargeLabels:
+  env: ${CI_COMMIT_REF_SLUG}
+  app: ${CI_PROJECT_NAME}
+  owner: ${GITLAB_USER_NAME}
+  source: ${CI_PROJECT_PATH_SLUG}
+  service: app
+  org: unset
+  team: unset
+
+podAnnotations:
+  rechargeapps.net/env: ${CI_COMMIT_REF_SLUG}
+  rechargeapps.net/app: ${CI_PROJECT_NAME}
+  rechargeapps.net/version: ${CI_COMMIT_SHA}
+
+application:
+  # add environment variables here
+  env:
+    RELEASE: ${CI_COMMIT_SHA}
+    NODE_ENV: production
+    RECHARGE_API_URL: https://api.rechargeapps.com
+    SHOPIFY_STORE_DOMAIN: mels-tasty-meals.myshopify.com
+    SHOPIFY_CLIENT_ID: "00d8b0271f65191a58d3bf0b8436fee9"
+    RECHARGE_ADMIN_URL: https://mels-tasty-meals-sp.admin.rechargeapps.com
+
+  port: 3000
+
+secret:
+  # add sensitive environment variables here
+  # to retrieve from vault, use a format like this:
+  # FOO: 'ref+vault://<path-to-secret>#/<key-name>'
+  env:
+    SESSION_SECRET: ref+vault://secret/stage/mealkit-demo-portal/session_secret#/key
+    SHOPIFY_CLIENT_SECRET: ref+vault://secret/stage/mealkit-demo-portal/shopify_client_secret#/key
+    RECHARGE_STOREFRONT_ACCESS_TOKEN: ref+vault://secret/stage/mealkit-demo-portal/recharge_storefront_access_token#/key
+    RECHARGE_API_KEY: ref+vault://secret/stage/mealkit-demo-portal/recharge_api_key#/key
+
+gateway:
+  enabled: true
+  hostnames:
+    - ${CI_COMMIT_REF_SLUG}.stage.rechargeapps.net
+
+autoscaling:
+  enabled: false
+
+pdb:
+  enabled: false
+
+probes:
+  livenessProbe:
+    httpGet:
+      path: /login
+  readinessProbe:
+    httpGet:
+      path: /login
+  startupProbe:
+    httpGet:
+      path: /login

@@ -56,17 +56,22 @@ You'll put both values in `.env` in Step 3.
 
 The portal fetches product images and collection data from Shopify. It needs a Shopify app with "client credentials" grant (no OAuth redirect required).
 
-1. Go to [partners.shopify.com](https://partners.shopify.com) and log in
-2. Open your Partner Dashboard → **Apps**
+1. Go to [dev.shopify.com](https://dev.shopify.com) and log in
+2. Open the **dev dashboard** → **Apps**
 3. Either select an existing app or create a new one:
    - Click **Create app** → choose **Create app manually**
    - Give it a name like "Demo Portal Products"
-4. Go to the app's **Configuration** tab
+4. Go to the app's **Configuration** (Settings) tab
 5. Under **Access scopes**, add:
-   - `read_products`
+   - `read_customers`
+   - `write_customers`
+   - `read_product_feeds`
    - `read_product_listings`
-6. Save and create a new version if prompted
-7. Install the app on your Shopify store
+   - `read_products`
+   - `customer_read_orders`
+   - `customer_write_orders`
+6. Save — this creates a **new version**. Release it so it becomes the **Active** version (app config is version-based; the store only grants what the active released version declares).
+7. Install (or re-grant) the app on your Shopify store and accept the new-scopes banner when it appears. The `customer_*_orders` scopes are protected customer data — you may also need to request access under **Protected customer data access** in the dashboard.
 8. Note down:
    - **Client ID** — visible on the app overview page
    - **Client Secret** — starts with `shpss_`, found under **API credentials** or **Client credentials**

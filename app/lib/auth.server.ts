@@ -44,6 +44,23 @@ export type ResolvedCustomerSession = {
   email: string;
 };
 
+const DEMO_BYPASS_EMAIL = "demo-customer@rechargeapps.com";
+const DEMO_BYPASS_CUSTOMER_ID = "252481964";
+
+export function isDemoBypassEmail(email: string): boolean {
+  return email.trim().toLowerCase() === DEMO_BYPASS_EMAIL;
+}
+
+export function buildDemoBypassSession(): ResolvedCustomerSession {
+  return {
+    apiToken: "demo-bypass",
+    customerId: DEMO_BYPASS_CUSTOMER_ID,
+    // Long-lived so demos aren't interrupted by the 55-min TTL.
+    apiTokenExpiresAt: Date.now() + 1000 * 60 * 60 * 24 * 7,
+    email: DEMO_BYPASS_EMAIL,
+  };
+}
+
 export async function completePasswordlessLogin(
   email: string,
   sessionToken: string,

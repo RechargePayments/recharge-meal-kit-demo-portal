@@ -14,9 +14,11 @@
 ## GitLab remote
 
 - Host: `gitlab.rechargeapps.net`
-- Repo: `engineering/subscriptions/future-charge-manipulation-demo-portal`
-- Remote URL: `https://gitlab.rechargeapps.net/engineering/subscriptions/future-charge-manipulation-demo-portal.git`
+- Repo: `engineering/subscriptions/mealkit-demo-portal`
+- Project URL: `https://gitlab.rechargeapps.net/engineering/subscriptions/mealkit-demo-portal`
+- Remote URL: `https://gitlab.rechargeapps.net/engineering/subscriptions/mealkit-demo-portal.git`
 - Default branch: `master`
+- Open MRs: `https://gitlab.rechargeapps.net/engineering/subscriptions/mealkit-demo-portal/-/merge_requests`
 
 ## Pushing a branch and creating a merge request
 
@@ -40,7 +42,7 @@
      --target-branch master \
      --title "MR title" \
      --description "MR body" \
-     --repo engineering/subscriptions/future-charge-manipulation-demo-portal \
+     --repo engineering/subscriptions/mealkit-demo-portal \
      --no-editor
    ```
 

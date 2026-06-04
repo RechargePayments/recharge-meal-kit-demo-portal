@@ -73,6 +73,7 @@ type AddonProduct = {
   variantTitle: string;
   imageUrl: string | null;
   price: string;
+  tags: string[];
 };
 
 type BundleSubscriptionTab = {
@@ -354,6 +355,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
             variantTitle: v.title,
             imageUrl: p.image_url ?? null,
             price: v.price ?? "0.00",
+            tags: p.tags ?? [],
           }))
       )
     );
@@ -715,108 +717,74 @@ export default function Dashboard() {
       )?.purchase_item_id ?? activeSubscriptionId
       : null);
 
+  const activeSub = subscriptions.find((s) => s.status === "active") ?? subscriptions[0];
+
+  const selectWeek = (i: number) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("week", String(tabsWithBundles[i].chargeId));
+    setSearchParams(params, { preventScrollReset: true });
+  };
+
   return (
     <div className="min-h-screen bg-cream bg-grain">
       <Header customer={customer} refreshing={state === "loading"} addresses={addresses} subscriptions={subscriptions} />
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* Compact info bar: delivery + credits + taste profile */}
-        <DashboardInfoBar
-          subscriptions={subscriptions}
-          deliveryDateOffset={deliveryDateOffset}
-          creditSummary={creditSummary}
-          preferences={customerPreferences}
-          customerId={String(customer.id)}
-        />
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        {bundleSubscriptions.length > 1 && (
+          <SubscriptionTabs
+            subscriptions={bundleSubscriptions}
+            activeSubscriptionId={activeSubscriptionId}
+            onSelect={(purchaseItemId) => {
+              const params = new URLSearchParams(searchParams);
+              params.set("subscription", String(purchaseItemId));
+              params.delete("week");
+              setSearchParams(params, { preventScrollReset: true });
+            }}
+          />
+        )}
 
-        {/* Week tabs + Meal grid */}
         {tabsWithBundles.length > 0 ? (
-          <section>
-            {bundleSubscriptions.length > 1 && (
-              <SubscriptionTabs
-                subscriptions={bundleSubscriptions}
-                activeSubscriptionId={activeSubscriptionId}
-                onSelect={(purchaseItemId) => {
-                  const params = new URLSearchParams(searchParams);
-                  params.set("subscription", String(purchaseItemId));
-                  params.delete("week");
-                  setSearchParams(params, { preventScrollReset: true });
-                }}
-              />
-            )}
-
-            <WeekTabs
+          isLoadingTab && !activeBundle && !activeChargeIsSkipped ? (
+            <LoadingGrid />
+          ) : activeBundle ? (
+            <WeekView
+              key={activeBundle.charge.id}
+              activeBundle={activeBundle}
               tabs={tabsWithBundles}
               activeIndex={activeIndex}
+              onSelectWeek={selectWeek}
               deliveryDateOffset={deliveryDateOffset}
-              onSelect={(i) => {
-                const params = new URLSearchParams(searchParams);
-                params.set("week", String(tabsWithBundles[i].chargeId));
-                setSearchParams(params, { preventScrollReset: true });
-              }}
+              modificationWindowDays={modificationWindowDays}
+              bundleVariantId={activeBundleVariantId}
+              locked={activeTabLocked}
+              isLoadingTab={isLoadingTab}
+              preferences={customerPreferences}
+              customerId={String(customer.id)}
+              addonProducts={addonProducts}
+              activeAddons={activeAddons}
+              creditSummary={creditSummary}
+              purchaseItemId={activeChargePurchaseItemId}
+              subscriptionFrequency={frequencyLabel(activeSub)}
             />
-
-            {isLoadingTab && !activeBundle && !activeChargeIsSkipped ? (
-              <LoadingGrid />
-            ) : activeBundle ? (
-              <div key={activeBundle.charge.id} className={`animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
-                {activeBundle.charge.status === "skipped" ? (
-                  <SkippedBanner
-                    chargeId={activeBundle.charge.id}
-                    scheduledAt={activeBundle.charge.scheduled_at}
-                    deliveryDateOffset={deliveryDateOffset}
-                    purchaseItemId={activeChargePurchaseItemId}
-                    bundleVariantId={activeBundleVariantId}
-                  />
-                ) : activeTabLocked && (
-                  <LockedBanner
-                    scheduledAt={activeBundle.charge.scheduled_at}
-                    deliveryDateOffset={deliveryDateOffset}
-                    modificationWindowDays={modificationWindowDays}
-                  />
-                )}
-
-                {activeBundle.bundleSelections.map((bs) => (
-                  <MealGrid
-                    key={bs.id}
-                    charge={activeBundle.charge}
-                    bundleSelection={bs}
-                    subscriptionTitle={activeBundle.subscriptionTitles[bs.purchase_item_id] ?? `Subscription #${bs.purchase_item_id}`}
-                    availableCollections={bs.external_product_id ? (activeBundle.collectionsByProductId[bs.external_product_id] ?? []) : []}
-                    quantityRanges={bs.external_product_id ? (activeBundle.bundleProductRangesByProductId[bs.external_product_id] ?? []) : []}
-                    preferences={customerPreferences}
-                    eligibleCollectionIds={activeBundle.eligibleCollectionIds}
-                    hasPresetForWeek={activeBundle.hasPresetForWeek}
-                    deliveryDateOffset={deliveryDateOffset}
-                    bundleVariantId={activeBundleVariantId}
-                    locked={activeTabLocked}
-                  />
-                ))}
-
-                {activeAddons.length > 0 && (
-                  <AddedAddOns
-                    items={activeAddons}
-                    addonProducts={addonProducts}
-                    locked={activeTabLocked}
-                    scheduledAt={activeBundle.charge.scheduled_at}
-                    bundleVariantId={activeBundleVariantId}
-                  />
-                )}
-
-                {addonProducts.length > 0 && (
-                  <AddOnsCarousel
-                    products={addonProducts}
-                    addressId={activeBundle.charge.address_id ?? 0}
-                    scheduledAt={activeBundle.charge.scheduled_at}
-                    bundleVariantId={activeBundleVariantId}
-                    locked={activeTabLocked}
-                  />
-                )}
-              </div>
-            ) : activeCharge && activeChargeIsSkipped ? (
-              // Skipped charge whose bundle_selection was dropped by Recharge —
-              // we still want the customer to see the week and unskip it.
-              <div key={activeCharge.id} className="animate-fade-in">
+          ) : activeCharge && activeChargeIsSkipped ? (
+            // Skipped charge whose bundle_selection was dropped by Recharge —
+            // we still want the customer to see the week and unskip it.
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+              <div className="lg:col-span-2 space-y-6">
+                <NextDeliveryCard
+                  scheduledAt={activeCharge.scheduled_at}
+                  deliveryDateOffset={deliveryDateOffset}
+                  mealsSelected={0}
+                  mealsTarget={MEALS_PER_WEEK}
+                  frequency={frequencyLabel(activeSub)}
+                  skipped
+                />
+                <WeekTabs
+                  tabs={tabsWithBundles}
+                  activeIndex={activeIndex}
+                  deliveryDateOffset={deliveryDateOffset}
+                  onSelect={selectWeek}
+                />
                 <SkippedBanner
                   chargeId={activeCharge.id}
                   scheduledAt={activeCharge.scheduled_at}
@@ -826,8 +794,15 @@ export default function Dashboard() {
                 />
                 <SkippedChargeSummary charge={activeCharge} deliveryDateOffset={deliveryDateOffset} />
               </div>
-            ) : null}
-          </section>
+              <aside className="lg:col-span-1">
+                <OrderTotalCard
+                  totalPrice={activeCharge.total_price}
+                  mealsSelected={0}
+                  creditSummary={creditSummary}
+                />
+              </aside>
+            </div>
+          ) : null
         ) : activeCharges.length > 0 ? (
           <ChargesListSimple
             charges={activeCharges}
@@ -840,6 +815,669 @@ export default function Dashboard() {
           <EmptyState />
         )}
       </main>
+    </div>
+  );
+}
+
+function frequencyLabel(sub: Subscription | undefined): string | null {
+  if (!sub?.charge_interval_frequency || !sub?.order_interval_unit) return null;
+  const n = sub.charge_interval_frequency;
+  return `Every ${n} ${sub.order_interval_unit}${n > 1 ? "s" : ""}`;
+}
+
+// ─── Week view (two-column: meals + add-on sidebar) ───────────────────────────
+
+function WeekView({
+  activeBundle,
+  tabs,
+  activeIndex,
+  onSelectWeek,
+  deliveryDateOffset,
+  modificationWindowDays,
+  bundleVariantId,
+  locked,
+  isLoadingTab,
+  preferences,
+  customerId,
+  addonProducts,
+  activeAddons,
+  creditSummary,
+  purchaseItemId,
+  subscriptionFrequency,
+}: {
+  activeBundle: ActiveChargeBundle;
+  tabs: ChargeTabInfo[];
+  activeIndex: number;
+  onSelectWeek: (index: number) => void;
+  deliveryDateOffset: number;
+  modificationWindowDays: number;
+  bundleVariantId: string;
+  locked: boolean;
+  isLoadingTab: boolean;
+  preferences: CustomerPreference | null;
+  customerId: string;
+  addonProducts: AddonProduct[];
+  activeAddons: ChargeLineItem[];
+  creditSummary: CreditSummary | null;
+  purchaseItemId: number | null;
+  subscriptionFrequency: string | null;
+}) {
+  const charge = activeBundle.charge;
+  const primary = activeBundle.bundleSelections[0] ?? null;
+  const isSkipped = charge.status === "skipped";
+
+  const initialCount = primary ? primary.items.reduce((sum, item) => sum + item.quantity, 0) : 0;
+  const [mealsSelected, setMealsSelected] = useState(initialCount);
+
+  return (
+    <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
+      <div className="lg:col-span-2 space-y-6">
+        <NextDeliveryCard
+          scheduledAt={charge.scheduled_at}
+          deliveryDateOffset={deliveryDateOffset}
+          mealsSelected={mealsSelected}
+          mealsTarget={MEALS_PER_WEEK}
+          frequency={subscriptionFrequency}
+          skipped={isSkipped}
+          editHref={`/${customerId}/account`}
+        />
+
+        <WeekTabs
+          tabs={tabs}
+          activeIndex={activeIndex}
+          deliveryDateOffset={deliveryDateOffset}
+          onSelect={onSelectWeek}
+        />
+
+        {isSkipped ? (
+          <SkippedBanner
+            chargeId={charge.id}
+            scheduledAt={charge.scheduled_at}
+            deliveryDateOffset={deliveryDateOffset}
+            purchaseItemId={purchaseItemId}
+            bundleVariantId={bundleVariantId}
+          />
+        ) : locked ? (
+          <LockedBanner
+            scheduledAt={charge.scheduled_at}
+            deliveryDateOffset={deliveryDateOffset}
+            modificationWindowDays={modificationWindowDays}
+          />
+        ) : charge.status === "queued" ? (
+          <SkipWeekButton
+            chargeId={charge.id}
+            scheduledAt={charge.scheduled_at}
+            purchaseItemId={primary?.purchase_item_id ?? purchaseItemId}
+            bundleVariantId={bundleVariantId}
+          />
+        ) : null}
+
+        <div>
+          <MealsHeader
+            mealsSelected={mealsSelected}
+            preferences={preferences}
+            customerId={customerId}
+          />
+
+          {primary && (
+            <MealGrid
+              key={primary.id}
+              charge={charge}
+              bundleSelection={primary}
+              availableCollections={primary.external_product_id ? (activeBundle.collectionsByProductId[primary.external_product_id] ?? []) : []}
+              quantityRanges={primary.external_product_id ? (activeBundle.bundleProductRangesByProductId[primary.external_product_id] ?? []) : []}
+              preferences={preferences}
+              eligibleCollectionIds={activeBundle.eligibleCollectionIds}
+              hasPresetForWeek={activeBundle.hasPresetForWeek}
+              bundleVariantId={bundleVariantId}
+              locked={locked}
+              onCountChange={setMealsSelected}
+            />
+          )}
+        </div>
+      </div>
+
+      <aside className="lg:col-span-1 space-y-6">
+        <AddOnsSidebar
+          products={addonProducts}
+          addedItems={activeAddons}
+          addressId={charge.address_id ?? 0}
+          scheduledAt={charge.scheduled_at}
+          bundleVariantId={bundleVariantId}
+          preferences={preferences}
+          locked={locked}
+        />
+        <OrderTotalCard
+          totalPrice={charge.total_price}
+          mealsSelected={mealsSelected}
+          creditSummary={creditSummary}
+        />
+      </aside>
+    </div>
+  );
+}
+
+// ─── Next delivery hero card ──────────────────────────────────────────────────
+
+function NextDeliveryCard({
+  scheduledAt,
+  deliveryDateOffset,
+  mealsSelected,
+  mealsTarget,
+  frequency,
+  skipped = false,
+  editHref,
+}: {
+  scheduledAt: string;
+  deliveryDateOffset: number;
+  mealsSelected: number;
+  mealsTarget: number;
+  frequency: string | null;
+  skipped?: boolean;
+  editHref?: string;
+}) {
+  const deliveryDate = addDaysToDate(scheduledAt, deliveryDateOffset);
+  const complete = mealsSelected === mealsTarget && mealsTarget > 0;
+  const pct = mealsTarget > 0 ? Math.min(100, (mealsSelected / mealsTarget) * 100) : 0;
+
+  return (
+    <div className="card p-5 sm:p-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-wider text-stone-400">Next delivery</p>
+          <p className="font-display text-2xl sm:text-3xl font-bold text-stone-900 mt-1 leading-tight">
+            {formatDate(deliveryDate)}
+          </p>
+          {frequency && <p className="text-xs text-stone-400 mt-1">{frequency}</p>}
+        </div>
+
+        <div className="flex items-center gap-3 flex-none">
+          <span
+            className={`badge ${complete ? "bg-brand-100 text-brand-700" : "bg-amber-100 text-amber-700"}`}
+          >
+            {mealsSelected}/{mealsTarget} meals
+          </span>
+          {editHref && (
+            <Link to={editHref} className="text-sm font-medium text-stone-500 hover:text-brand-700 transition-colors">
+              Edit
+            </Link>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 h-2 bg-stone-100 rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-500 ease-out"
+          style={{
+            width: `${pct}%`,
+            background: skipped
+              ? "#d6d3d1"
+              : complete
+                ? "linear-gradient(to right, #22c55e, #4ade80)"
+                : "#fbbf24",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ─── Meals header + taste-profile preferences ─────────────────────────────────
+
+function MealsHeader({
+  mealsSelected,
+  preferences,
+  customerId,
+}: {
+  mealsSelected: number;
+  preferences: CustomerPreference | null;
+  customerId: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const persisted = preferences?.exclude ?? [];
+
+  // While a save is in flight, optimistically reflect the submitted values so
+  // chips toggle instantly instead of waiting for the loader to revalidate.
+  const optimistic =
+    fetcher.formData && fetcher.formData.get("intent") === "update_preferences"
+      ? (fetcher.formData.getAll("exclude").filter((v): v is string => typeof v === "string"))
+      : null;
+  const current = optimistic ?? persisted;
+  const saving = fetcher.state !== "idle";
+  const justSaved =
+    fetcher.state === "idle" &&
+    fetcher.data != null &&
+    "success" in fetcher.data &&
+    (fetcher.data as { intent?: string }).intent === "update_preferences";
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<string[]>(persisted);
+
+  const persist = (next: string[]) => {
+    const formData = new FormData();
+    formData.set("intent", "update_preferences");
+    formData.set("customerId", customerId);
+    for (const tag of next) formData.append("exclude", tag);
+    fetcher.submit(formData, { method: "post" });
+  };
+
+  const toggleQuick = (filter: (typeof DIET_FILTERS)[number]) => {
+    const active = filter.tags.some((t) => excludeIncludes(current, t));
+    const next = active
+      ? current.filter((e) => !filter.tags.some((t) => t.toLowerCase() === e.toLowerCase()))
+      : [...new Set([...current, ...filter.tags])];
+    persist(next);
+  };
+
+  const openEditor = () => {
+    setDraft(current);
+    setEditing(true);
+  };
+
+  const toggleDraft = (tag: string) =>
+    setDraft((prev) =>
+      excludeIncludes(prev, tag) ? prev.filter((e) => e.toLowerCase() !== tag.toLowerCase()) : [...prev, tag]
+    );
+
+  // Surface any saved exclusion that isn't one of the predefined options so the
+  // customer can still see and remove it.
+  const extraOptions = current.filter((e) => !PREFERENCE_OPTIONS.some((o) => o.toLowerCase() === e.toLowerCase()));
+  const editorOptions = [...PREFERENCE_OPTIONS, ...extraOptions];
+
+  return (
+    <div className="mb-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-display text-xl font-bold text-stone-900">
+          Your meals
+          <span className="ml-2 text-sm font-medium text-stone-400">
+            · {mealsSelected} of {MEALS_PER_WEEK} selected
+          </span>
+        </h2>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {DIET_FILTERS.map((filter) => {
+            const active = filter.tags.some((t) => excludeIncludes(current, t));
+            return (
+              <button
+                key={filter.id}
+                type="button"
+                onClick={() => toggleQuick(filter)}
+                disabled={saving}
+                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150 disabled:opacity-60 ${
+                  active ? filter.activeTone : filter.tone
+                }`}
+              >
+                {active && (
+                  <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M16.704 5.29a1 1 0 010 1.42l-7.5 7.5a1 1 0 01-1.42 0l-3.5-3.5a1 1 0 111.42-1.42l2.79 2.79 6.79-6.79a1 1 0 011.42 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+                {filter.label}
+              </button>
+            );
+          })}
+
+          <button
+            type="button"
+            onClick={() => (editing ? setEditing(false) : openEditor())}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150 ${
+              editing
+                ? "border-stone-300 bg-stone-100 text-stone-700"
+                : "border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:text-stone-800"
+            }`}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527a1.125 1.125 0 01-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            {editing ? "Close" : "Preferences"}
+          </button>
+        </div>
+      </div>
+
+      {editing && (
+        <div className="card p-4 ring-1 ring-stone-200 animate-slide-up">
+          <div className="flex items-center justify-between gap-3 mb-1">
+            <h3 className="font-display text-sm font-bold text-stone-900">Dietary preferences</h3>
+            {justSaved && !saving && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium" style={{ color: "#16a34a" }}>
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                Saved
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-stone-400 mb-3">
+            Ingredients you avoid. Saved to your profile and used to flag meals &amp; add-ons every week.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            {editorOptions.map((tag) => {
+              const active = excludeIncludes(draft, tag);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => toggleDraft(tag)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-all duration-150 ${
+                    active
+                      ? "border-amber-300 bg-amber-50 text-amber-700 ring-1 ring-amber-200"
+                      : "border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-700"
+                  }`}
+                >
+                  {active && (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M16.704 5.29a1 1 0 010 1.42l-7.5 7.5a1 1 0 01-1.42 0l-3.5-3.5a1 1 0 111.42-1.42l2.79 2.79 6.79-6.79a1 1 0 011.42 0z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                  {tag}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-3 mt-4 pt-3 border-t border-stone-100">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => {
+                persist(draft);
+                setEditing(false);
+              }}
+              className="btn-primary text-sm px-5 py-2"
+            >
+              {saving ? "Saving..." : "Save preferences"}
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => setEditing(false)}
+              className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Skip week button (under the week picker) ─────────────────────────────────
+
+function SkipWeekButton({
+  chargeId,
+  scheduledAt,
+  purchaseItemId,
+  bundleVariantId,
+}: {
+  chargeId: number;
+  scheduledAt: string;
+  purchaseItemId: number | null;
+  bundleVariantId: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const isSkipping = fetcher.state !== "idle";
+  const error =
+    fetcher.state === "idle" && fetcher.data != null && "error" in fetcher.data
+      ? (fetcher.data as { error: string }).error
+      : null;
+
+  return (
+    <div>
+      <fetcher.Form method="post">
+        <input type="hidden" name="intent" value="skip" />
+        <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
+        <input type="hidden" name="chargeId" value={String(chargeId)} />
+        <input type="hidden" name="scheduledAt" value={scheduledAt} />
+        {purchaseItemId != null && <input type="hidden" name="purchaseItemId" value={String(purchaseItemId)} />}
+        <button
+          type="submit"
+          disabled={isSkipping}
+          className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 transition-all duration-150 hover:bg-amber-100 hover:border-amber-400 active:scale-[0.99] disabled:opacity-60"
+        >
+          {isSkipping ? (
+            <>
+              <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Skipping this week...
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 5l7 7-7 7M13 5l7 7-7 7" />
+              </svg>
+              Skip this week
+            </>
+          )}
+        </button>
+      </fetcher.Form>
+      {error && <p className="mt-1.5 text-xs font-medium text-red-700">{error}</p>}
+    </div>
+  );
+}
+
+// ─── Order total summary ──────────────────────────────────────────────────────
+
+function OrderTotalCard({
+  totalPrice,
+  mealsSelected,
+  creditSummary,
+}: {
+  totalPrice: string;
+  mealsSelected: number;
+  creditSummary: CreditSummary | null;
+}) {
+  const hasCredits = creditSummary && parseFloat(creditSummary.total_available_balance) > 0;
+
+  return (
+    <div className="card p-5 lg:sticky lg:top-6">
+      <p className="text-xs font-semibold uppercase tracking-wider text-stone-400">Order total</p>
+      <div className="flex items-end justify-between gap-3 mt-1.5">
+        <p className="text-xs text-stone-400 leading-snug max-w-[55%]">
+          {mealsSelected} meal{mealsSelected !== 1 ? "s" : ""} · updates as you customize
+        </p>
+        <p className="font-display text-2xl font-bold text-stone-900 tabular-nums">{formatCurrency(totalPrice)}</p>
+      </div>
+
+      {hasCredits && (
+        <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+          <svg className="w-4 h-4 flex-none" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
+          </svg>
+          {formatCurrency(creditSummary!.total_available_balance, creditSummary!.currency_code)} credit available
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Add-ons sidebar ──────────────────────────────────────────────────────────
+
+function AddOnsSidebar({
+  products,
+  addedItems,
+  addressId,
+  scheduledAt,
+  bundleVariantId,
+  preferences,
+  locked = false,
+}: {
+  products: AddonProduct[];
+  addedItems: ChargeLineItem[];
+  addressId: number;
+  scheduledAt: string;
+  bundleVariantId: string;
+  preferences: CustomerPreference | null;
+  locked?: boolean;
+}) {
+  if (products.length === 0 && addedItems.length === 0) return null;
+
+  const exclude = preferences?.exclude ?? [];
+  const imageByVariantId = Object.fromEntries(
+    products.filter((p) => p.imageUrl).map((p) => [p.externalVariantId, p.imageUrl])
+  );
+  const addedVariantIds = new Set(
+    addedItems.map((i) => i.external_variant_id?.ecommerce).filter(Boolean) as string[]
+  );
+  const available = products.filter((p) => !addedVariantIds.has(p.externalVariantId));
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 pt-5 pb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 rounded-full flex items-center justify-center flex-none" style={{ backgroundColor: "rgba(244, 162, 97, 0.18)" }}>
+            <svg className="w-3.5 h-3.5" style={{ color: "#E76F51" }} viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
+            </svg>
+          </div>
+          <h3 className="font-display text-base font-bold text-stone-900">Add something extra</h3>
+        </div>
+        <p className="text-xs text-stone-400 mt-1">Add-ons are separate from your meal plan.</p>
+      </div>
+
+      <div className="divide-y divide-stone-100">
+        {addedItems.map((item) => (
+          <AddedAddonRow
+            key={item.purchase_item_id}
+            item={item}
+            imageByVariantId={imageByVariantId}
+            locked={locked}
+            scheduledAt={scheduledAt}
+            bundleVariantId={bundleVariantId}
+          />
+        ))}
+        {available.map((product) => (
+          <AddonSidebarRow
+            key={product.externalVariantId}
+            product={product}
+            addressId={addressId}
+            scheduledAt={scheduledAt}
+            bundleVariantId={bundleVariantId}
+            excluded={matchesTags(product.tags, exclude)}
+            allergens={allergenLabel(product.tags, exclude)}
+            locked={locked}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AddonSidebarRow({
+  product,
+  addressId,
+  scheduledAt,
+  bundleVariantId,
+  excluded,
+  allergens,
+  locked = false,
+}: {
+  product: AddonProduct;
+  addressId: number;
+  scheduledAt: string;
+  bundleVariantId: string;
+  excluded: boolean;
+  allergens: string | null;
+  locked?: boolean;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const isAdding = fetcher.state !== "idle";
+  const fetcherData = fetcher.data as
+    | { success: true; intent: "add_addon" }
+    | { error: string; intent: "add_addon" }
+    | undefined;
+  const wasAdded = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
+  const addError =
+    fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
+      ? (fetcherData as { error: string }).error
+      : null;
+
+  const handleAdd = () => {
+    fetcher.submit(
+      {
+        intent: "add_addon",
+        bundleVariantId,
+        addressId: String(addressId),
+        scheduledAt,
+        externalProductId: product.externalProductId,
+        externalVariantId: product.externalVariantId,
+        price: product.price,
+        quantity: "1",
+      },
+      { method: "post" }
+    );
+  };
+
+  return (
+    <div className={`flex items-center gap-3 px-5 py-3 transition-opacity ${excluded ? "opacity-60" : ""}`}>
+      {product.imageUrl ? (
+        <img
+          src={product.imageUrl}
+          alt={product.title}
+          className={`w-11 h-11 rounded-lg object-cover flex-none bg-stone-100 ${excluded ? "grayscale" : ""}`}
+        />
+      ) : (
+        <div className="w-11 h-11 rounded-lg bg-stone-100 flex items-center justify-center flex-none">
+          <svg className="w-5 h-5 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        </div>
+      )}
+
+      <div className="flex-1 min-w-0">
+        <p className={`text-sm font-semibold leading-tight truncate ${excluded ? "text-stone-400 line-through" : "text-stone-800"}`}>
+          {product.title}
+        </p>
+        {excluded && allergens ? (
+          <p className="text-xs font-medium mt-0.5" style={{ color: "#E76F51" }}>{allergens}</p>
+        ) : (
+          <p className="text-sm font-bold text-stone-900 mt-0.5">{formatCurrency(product.price)}</p>
+        )}
+        {addError && <p className="text-xs text-red-600 mt-0.5 line-clamp-2">{addError}</p>}
+      </div>
+
+      <div className="flex-none">
+        {excluded || locked ? (
+          <span className="inline-flex items-center rounded-lg bg-stone-100 px-3 py-1.5 text-xs font-semibold text-stone-400">
+            Avoid
+          </span>
+        ) : wasAdded ? (
+          <span className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold" style={{ color: "#16a34a", backgroundColor: "#dcfce7" }}>
+            <svg className="w-3.5 h-3.5 animate-check-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+            Added
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={isAdding}
+            className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-bold text-white transition-colors disabled:opacity-50"
+            style={{ backgroundColor: "#16a34a" }}
+            onMouseEnter={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#15803d"; }}
+            onMouseLeave={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#16a34a"; }}
+          >
+            {isAdding ? (
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12M6 12h12" />
+                </svg>
+                Add
+              </>
+            )}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1220,194 +1858,6 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
   );
 }
 
-// ─── Dashboard info bar (compact banners) ─────────────────────────────────────
-
-const EXCLUSION_OPTIONS = ["Dairy", "Wheat", "Meat", "Fish", "Eggs"];
-
-function DashboardInfoBar({
-  subscriptions,
-  deliveryDateOffset,
-  creditSummary,
-  preferences,
-  customerId,
-}: {
-  subscriptions: Subscription[];
-  deliveryDateOffset: number;
-  creditSummary: CreditSummary | null;
-  preferences: CustomerPreference | null;
-  customerId: string;
-}) {
-  const fetcher = useFetcher();
-  const [editing, setEditing] = useState(false);
-  const [selectedExcludes, setSelectedExcludes] = useState<string[]>(preferences?.exclude ?? []);
-
-  const isSaving = fetcher.state !== "idle";
-
-  useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data && !("error" in (fetcher.data as Record<string, unknown>))) {
-      setEditing(false);
-    }
-  }, [fetcher.state, fetcher.data]);
-
-  useEffect(() => {
-    setSelectedExcludes(preferences?.exclude ?? []);
-  }, [preferences]);
-
-  const toggleExclude = (tag: string) =>
-    setSelectedExcludes((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
-
-  const hasPrefs = Boolean(preferences && preferences.exclude.length > 0);
-
-  const activeSub = subscriptions.find((s) => s.status === "active") ?? subscriptions[0];
-  const chargeDate = activeSub?.next_charge_scheduled_at;
-  const deliveryDate = chargeDate ? addDaysToDate(chargeDate, deliveryDateOffset) : null;
-  const freq = activeSub?.charge_interval_frequency && activeSub?.order_interval_unit
-    ? `Every ${activeSub.charge_interval_frequency} ${activeSub.order_interval_unit}${activeSub.charge_interval_frequency > 1 ? "s" : ""}`
-    : null;
-
-  const hasCredits = creditSummary && parseFloat(creditSummary.total_available_balance) > 0;
-
-  return (
-    <div className="space-y-2">
-      {/* Compact info bar */}
-      <div className="card px-4 py-2.5">
-        <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-stone-150">
-          {/* Delivery cell */}
-          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:pr-4">
-            <svg className="w-4 h-4 text-brand-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M8 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM15 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" />
-              <path d="M0 4a1 1 0 011-1h9a1 1 0 011 1v7h2V8a1 1 0 011-1h2.05l1.82 3.64A1 1 0 0118 11v4h1a1 1 0 110 2h-1.05a2.5 2.5 0 01-4.9 0H7.95a2.5 2.5 0 01-4.9 0H1a1 1 0 01-1-1V4z" />
-            </svg>
-            {activeSub && deliveryDate ? (
-              <div className="flex items-baseline gap-1.5 min-w-0">
-                <span className="text-sm font-semibold text-stone-800 truncate">Next: {formatDate(deliveryDate)}</span>
-                {freq && <span className="text-xs text-stone-400 flex-none">{freq}</span>}
-              </div>
-            ) : (
-              <span className="text-sm text-stone-400">No upcoming delivery</span>
-            )}
-          </div>
-
-          {/* Credits cell */}
-          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:px-4">
-            <svg className="w-4 h-4 text-emerald-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
-            </svg>
-            {hasCredits ? (
-              <span className="text-sm">
-                <span className="font-semibold text-emerald-700">{formatCurrency(creditSummary!.total_available_balance, creditSummary!.currency_code)}</span>
-                <span className="text-stone-400 ml-1">credit</span>
-              </span>
-            ) : (
-              <span className="text-sm text-stone-400">No credits</span>
-            )}
-          </div>
-
-          {/* Taste profile cell */}
-          <div className="flex items-center gap-2.5 py-1.5 md:py-0 md:pl-4">
-            <svg className="w-4 h-4 text-brand-500 flex-none" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-            </svg>
-            <div className="flex items-center gap-1.5 min-w-0 flex-1">
-              {hasPrefs ? (
-                <span className="text-sm text-stone-600 truncate">
-                  {preferences!.exclude.map((t) => `No ${t}`).join(", ")}
-                </span>
-              ) : (
-                <span className="text-sm text-stone-400">No preferences set</span>
-              )}
-            </div>
-            <button
-              onClick={() => setEditing(!editing)}
-              className="text-xs font-medium text-brand-600 hover:text-brand-800 transition-colors flex-none"
-            >
-              {hasPrefs ? "Edit" : "Set"}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Expandable edit panel */}
-      {editing && (
-        <div className="card p-5 ring-2 ring-brand-200">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-display font-semibold text-stone-900 text-sm">Edit Taste Profile</h3>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Ingredients to Avoid</h4>
-              <div className="flex flex-wrap gap-2">
-                {EXCLUSION_OPTIONS.map((tag) => {
-                  const active = selectedExcludes.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => toggleExclude(tag)}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-all duration-150 ${
-                        active
-                          ? "bg-amber-50 text-amber-700 border-amber-300 ring-1 ring-amber-200"
-                          : "bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-700"
-                      }`}
-                    >
-                      {active && (
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                        </svg>
-                      )}
-                      {tag}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3 mt-4 pt-3 border-t border-stone-100">
-            <button
-              type="button"
-              disabled={isSaving}
-              onClick={() => {
-                const formData = new FormData();
-                formData.set("intent", "update_preferences");
-                formData.set("customerId", customerId);
-                for (const tag of selectedExcludes) formData.append("exclude", tag);
-                fetcher.submit(formData, { method: "post" });
-              }}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-50 rounded-lg transition-colors"
-              style={{ backgroundColor: "#16a34a" }}
-            >
-              {isSaving ? (
-                <>
-                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  Saving...
-                </>
-              ) : (
-                "Save"
-              )}
-            </button>
-            <button
-              type="button"
-              disabled={isSaving}
-              onClick={() => {
-                setSelectedExcludes(preferences?.exclude ?? []);
-                setEditing(false);
-              }}
-              className="px-4 py-1.5 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Skipped banner ───────────────────────────────────────────────────────────
 
 function SkippedBanner({
@@ -1649,9 +2099,9 @@ function WeekTabs({
   onSelect: (index: number) => void;
 }) {
   return (
-    <div className="mb-6">
-      <h2 className="font-display text-xl font-bold text-stone-900 mb-4">Your Meals</h2>
-      <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-wider text-stone-400 mb-2">Upcoming deliveries</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
         {tabs.map((tab, i) => {
           const isActive = i === activeIndex;
           const isSkipped = tab.status === "skipped";
@@ -1666,43 +2116,33 @@ function WeekTabs({
             <button
               key={tab.chargeId}
               onClick={() => onSelect(i)}
-              className={`flex-none rounded-2xl px-5 py-3 text-sm font-medium transition-all duration-200 border ${
-                isActive
-                  ? "text-white border-transparent scale-[1.02]"
-                  : inactiveClass
+              className={`rounded-2xl px-3 py-2.5 text-left transition-all duration-200 border ${
+                isActive ? "text-white border-transparent" : inactiveClass
               }`}
               style={isActive ? activeBg : undefined}
             >
-              <p className="font-semibold flex items-center gap-1.5">
+              <p className="flex items-center gap-1 text-[11px] font-semibold leading-tight">
                 {tab.locked && (
-                  <svg className="w-3.5 h-3.5 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <svg className="w-3 h-3 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                   </svg>
                 )}
-                <span className={isSkipped ? "line-through opacity-80" : undefined}>
-                  Delivery {formatWeekLabel(deliveryDate)}
+                <span className={`truncate ${isSkipped ? "line-through opacity-80" : ""}`}>
+                  {formatWeekLabel(deliveryDate)} · charge {formatWeekLabel(tab.scheduledAt)}
                 </span>
-                {isSkipped && (
-                  <span
-                    className={`ml-1 inline-flex items-center text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${
-                      isActive ? "bg-white/25 text-white" : "bg-amber-200 text-amber-900"
-                    }`}
-                  >
-                    Skipped
-                  </span>
-                )}
               </p>
-              <p
-                className={`text-xs mt-0.5 ${
-                  isActive
-                    ? isSkipped
-                      ? "text-amber-100"
-                      : "text-green-200"
-                    : "text-stone-400"
-                }`}
-              >
-                {formatCurrency(tab.totalPrice)} · Charged {formatWeekLabel(tab.scheduledAt)}
+              <p className={`mt-1 text-base font-bold tabular-nums ${isActive ? "text-white" : "text-stone-800"}`}>
+                {formatCurrency(tab.totalPrice)}
               </p>
+              {isSkipped && (
+                <span
+                  className={`mt-1 inline-flex items-center text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full ${
+                    isActive ? "bg-white/25 text-white" : "bg-amber-200 text-amber-900"
+                  }`}
+                >
+                  Skipped
+                </span>
+              )}
             </button>
           );
         })}
@@ -1727,6 +2167,36 @@ type EditableItem = {
 
 function matchesTags(itemTags: string[], prefTags: string[]): boolean {
   return itemTags.some((t) => prefTags.some((p) => p.toLowerCase() === t.toLowerCase()));
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/** Human-readable "Contains X + Y" label from the item tags that the customer
+ *  has chosen to avoid. Returns null when nothing conflicts. */
+function allergenLabel(itemTags: string[], prefTags: string[]): string | null {
+  const matched = itemTags.filter((t) => prefTags.some((p) => p.toLowerCase() === t.toLowerCase()));
+  const unique = [...new Set(matched.map((t) => capitalize(t)))];
+  if (unique.length === 0) return null;
+  return `Contains ${unique.join(" + ")}`;
+}
+
+// Quick dietary filters surfaced above the meal grid. Toggling one persists the
+// underlying exclusion tags to the customer's taste profile (Shopify customer tags).
+const DIET_FILTERS: { id: string; label: string; tags: string[]; tone: string; activeTone: string }[] = [
+  { id: "gf", label: "GF Only", tags: ["Gluten"], tone: "border-amber-200 text-amber-700 bg-amber-50/60 hover:border-amber-300", activeTone: "border-amber-400 text-amber-800 bg-amber-100 ring-1 ring-amber-200" },
+  { id: "df", label: "Dairy Free", tags: ["Dairy"], tone: "border-violet-200 text-violet-700 bg-violet-50/60 hover:border-violet-300", activeTone: "border-violet-400 text-violet-800 bg-violet-100 ring-1 ring-violet-200" },
+  { id: "veg", label: "Veg", tags: ["Meat", "Fish"], tone: "border-brand-200 text-brand-700 bg-brand-50 hover:border-brand-300", activeTone: "border-brand-400 text-brand-800 bg-brand-100 ring-1 ring-brand-200" },
+];
+
+// Full set of ingredients a customer can exclude from the "Edit preferences"
+// panel. Each is matched case-insensitively against Shopify product tags and
+// stored as an `rc_exclude_<slug>` tag on the Shopify customer.
+const PREFERENCE_OPTIONS = ["Gluten", "Dairy", "Eggs", "Meat", "Fish", "Shellfish", "Nuts", "Soy"];
+
+function excludeIncludes(set: string[], tag: string): boolean {
+  return set.some((e) => e.toLowerCase() === tag.toLowerCase());
 }
 
 function tierOf(item: EditableItem, preferences: CustomerPreference | null): number {
@@ -1796,30 +2266,27 @@ const MEALS_PER_WEEK = 5;
 function MealGrid({
   charge,
   bundleSelection,
-  subscriptionTitle,
   availableCollections,
   quantityRanges,
   preferences,
   eligibleCollectionIds,
   hasPresetForWeek,
-  deliveryDateOffset,
   bundleVariantId,
   locked = false,
+  onCountChange,
 }: {
   charge: Charge;
   bundleSelection: BundleSelection;
-  subscriptionTitle: string;
   availableCollections: BundleCollection[];
   quantityRanges: number[][];
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
   hasPresetForWeek: boolean;
-  deliveryDateOffset: number;
   bundleVariantId: string;
   locked?: boolean;
+  onCountChange?: (count: number) => void;
 }) {
   const fetcher = useFetcher<typeof action>();
-  const skipFetcher = useFetcher();
   const eligibleSet = new Set(eligibleCollectionIds);
   const [items, setItems] = useState<EditableItem[]>(() =>
     buildEditableItems(bundleSelection, availableCollections, preferences, eligibleSet)
@@ -1831,7 +2298,6 @@ function MealGrid({
   const submittedQtyRef = useRef<Record<string, number>>({});
 
   const isSaving = fetcher.state !== "idle";
-  const isSkipping = skipFetcher.state !== "idle";
   const fetcherData = fetcher.data as
     | { success: true; intent: "update_bundle" | "create_bundle" }
     | { error: string; ranges?: number[][]; intent: "update_bundle" | "create_bundle" }
@@ -1848,7 +2314,6 @@ function MealGrid({
 
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
   const isValidTotal = totalItems === MEALS_PER_WEEK;
-  const targetTotal = MEALS_PER_WEEK;
 
   const hasChanges = items.some((item) => {
     const orig = savedQty[item.external_variant_id] ?? 0;
@@ -1865,6 +2330,10 @@ function MealGrid({
       setItems((prev) => [...prev].sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences)));
     }
   }, [savedOk]);
+
+  useEffect(() => {
+    onCountChange?.(totalItems);
+  }, [totalItems, onCountChange]);
 
   const adjustQty = (index: number, delta: number) => {
     setItems((prev) =>
@@ -1907,8 +2376,6 @@ function MealGrid({
   };
 
   const chargeIsQueued = charge.status === "queued";
-  const customerId = charge.customer?.id ? String(charge.customer.id) : null;
-  const progressPercent = targetTotal > 0 ? Math.min(100, (totalItems / targetTotal) * 100) : 0;
 
   return (
     <div className="space-y-5">
@@ -1931,37 +2398,6 @@ function MealGrid({
         </div>
       )}
 
-      {/* Progress bar */}
-      {chargeIsQueued && targetTotal > 0 && (
-        <div className="card p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <h3 className="font-display font-semibold text-stone-900">{subscriptionTitle}</h3>
-              <span className="text-xs text-stone-400">
-                delivering {formatDate(addDaysToDate(charge.scheduled_at, deliveryDateOffset))}
-              </span>
-              <span className="text-xs text-stone-300">
-                (charged {formatDate(charge.scheduled_at)})
-              </span>
-            </div>
-            <span className="text-sm font-bold tabular-nums" style={{ color: isValidTotal ? "#16a34a" : "#d97706" }}>
-              {totalItems} / {MEALS_PER_WEEK} meals
-            </span>
-          </div>
-          <div className="h-2.5 bg-stone-100 rounded-full overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-500 ease-out"
-              style={{
-                width: `${progressPercent}%`,
-                background: isValidTotal
-                  ? "linear-gradient(to right, #22c55e, #4ade80)"
-                  : "#fbbf24",
-              }}
-            />
-          </div>
-        </div>
-      )}
-
       {/* Meal cards grid */}
       {!hasPresetForWeek && items.length === 0 ? (
         <div className="card p-8 text-center">
@@ -1981,7 +2417,8 @@ function MealGrid({
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         {items.map((item, index) => {
           const isSelected = item.quantity > 0;
-          const isPrefExclude = preferences && matchesTags(item.tags, preferences.exclude);
+          const isPrefExclude = Boolean(preferences && matchesTags(item.tags, preferences.exclude));
+          const allergens = preferences ? allergenLabel(item.tags, preferences.exclude) : null;
 
           return (
             <div
@@ -1989,7 +2426,9 @@ function MealGrid({
               className={`card overflow-hidden transition-all duration-200 ${
                 isSelected
                   ? "ring-2 ring-green-500"
-                  : "hover:-translate-y-0.5"
+                  : isPrefExclude
+                    ? "opacity-80"
+                    : "hover:-translate-y-0.5"
               }`}
               style={{
                 animationDelay: `${Math.min(index, 8) * 0.03}s`,
@@ -2003,7 +2442,7 @@ function MealGrid({
                     src={item.imageUrl}
                     alt={item.productTitle}
                     className={`w-full h-full object-cover transition-all duration-300 ${
-                      isSelected ? "" : "saturate-[0.85]"
+                      isPrefExclude ? "grayscale opacity-70" : isSelected ? "" : "saturate-[0.85]"
                     }`}
                   />
                 ) : (
@@ -2026,14 +2465,23 @@ function MealGrid({
                 {/* Preference badge */}
                 {isPrefExclude && (
                   <div className="absolute top-2 left-2">
-                    <span className="badge bg-amber-500 text-white text-[10px] shadow-warm-sm">Avoid</span>
+                    <span className="badge text-white text-[10px] shadow-warm-sm" style={{ backgroundColor: "#E76F51" }}>Avoid</span>
+                  </div>
+                )}
+
+                {/* Allergen note pill */}
+                {isPrefExclude && allergens && (
+                  <div className="absolute inset-x-0 bottom-2 flex justify-center px-2">
+                    <span className="inline-flex items-center rounded-full bg-stone-900/80 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-sm">
+                      {allergens}
+                    </span>
                   </div>
                 )}
               </div>
 
               {/* Card body */}
               <div className="p-3 text-center">
-                <h4 className="text-sm font-semibold text-stone-800 leading-tight line-clamp-2 mb-0.5">
+                <h4 className={`text-sm font-semibold leading-tight line-clamp-2 mb-0.5 ${isPrefExclude ? "text-stone-400 line-through" : "text-stone-800"}`}>
                   {item.productTitle}
                 </h4>
                 {item.variantTitle && item.variantTitle !== "Default Title" && (
@@ -2061,10 +2509,11 @@ function MealGrid({
                       {item.quantity}
                     </span>
                     <button
-                      onClick={() => adjustQty(index, 1)}
-                      disabled={totalItems >= MEALS_PER_WEEK}
-                      className="stepper-btn disabled:opacity-40 disabled:cursor-not-allowed"
-                      style={totalItems >= MEALS_PER_WEEK ? undefined : { backgroundColor: "#22c55e" }}
+                      onClick={() => { if (totalItems < MEALS_PER_WEEK) adjustQty(index, 1); }}
+                      aria-disabled={totalItems >= MEALS_PER_WEEK}
+                      title={totalItems >= MEALS_PER_WEEK ? "You've picked all 5 meals — remove one to swap" : "Add meal"}
+                      className={`stepper-btn ${totalItems >= MEALS_PER_WEEK ? "cursor-not-allowed" : ""}`}
+                      style={totalItems >= MEALS_PER_WEEK ? { backgroundColor: "#e7e5e4", color: "#a8a29e" } : { backgroundColor: "#22c55e" }}
                       onMouseEnter={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#16a34a"; }}
                       onMouseLeave={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#22c55e"; }}
                     >
@@ -2089,20 +2538,13 @@ function MealGrid({
       {chargeIsQueued && !locked && (
         <div className="sticky bottom-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
           <div className="card rounded-b-none border-b-0 border-x-0 sm:border-x px-5 py-4 flex items-center justify-between gap-4 backdrop-blur-sm bg-white/95">
-            <div className="flex items-center gap-4">
-              <skipFetcher.Form method="post">
-                <input type="hidden" name="intent" value="skip" />
-                <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
-                <input type="hidden" name="chargeId" value={String(charge.id)} />
-                <input type="hidden" name="scheduledAt" value={charge.scheduled_at} />
-                {bundleSelection.purchase_item_id && (
-                  <input type="hidden" name="purchaseItemId" value={String(bundleSelection.purchase_item_id)} />
-                )}
-                <button type="submit" disabled={isSkipping} className="btn-danger-ghost text-xs sm:text-sm">
-                  {isSkipping ? "Skipping..." : "Skip this week"}
-                </button>
-              </skipFetcher.Form>
-
+            <div className="flex items-center gap-3">
+              <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-800" : "text-amber-700"}`}>
+                {totalItems} / {MEALS_PER_WEEK} meals
+              </p>
+              {!isValidTotal && (
+                <span className="text-xs text-stone-400">Pick {MEALS_PER_WEEK} to save</span>
+              )}
               {savedOk && (
                 <span className="text-sm font-medium flex items-center gap-1 animate-fade-in" style={{ color: "#16a34a" }}>
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -2113,31 +2555,23 @@ function MealGrid({
               )}
             </div>
 
-            <div className="flex items-center gap-4">
-              <div className="hidden sm:block text-right">
-                <p className="text-xs text-stone-400">
-                  {totalItems} meal{totalItems !== 1 ? "s" : ""} selected
-                </p>
-                <p className="text-sm font-bold text-stone-800">{formatCurrency(charge.total_price)}</p>
-              </div>
-              <button
-                onClick={handleSave}
-                disabled={isSaving || !hasChanges || !isValidTotal}
-                className="btn-primary text-sm"
-              >
-                {isSaving ? (
-                  <>
-                    <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Saving...
-                  </>
-                ) : (
-                  "Save Selections"
-                )}
-              </button>
-            </div>
+            <button
+              onClick={handleSave}
+              disabled={isSaving || !hasChanges || !isValidTotal}
+              className="btn-primary text-sm"
+            >
+              {isSaving ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Saving...
+                </>
+              ) : (
+                "Save Selections"
+              )}
+            </button>
           </div>
         </div>
       )}
@@ -2145,56 +2579,7 @@ function MealGrid({
   );
 }
 
-// ─── Added add-ons (onetime line items) ───────────────────────────────────────
-
-function AddedAddOns({
-  items,
-  addonProducts,
-  locked = false,
-  scheduledAt,
-  bundleVariantId,
-}: {
-  items: ChargeLineItem[];
-  addonProducts: AddonProduct[];
-  locked?: boolean;
-  scheduledAt: string;
-  bundleVariantId: string;
-}) {
-  if (items.length === 0) return null;
-
-  const imageByVariantId = Object.fromEntries(
-    addonProducts.filter((p) => p.imageUrl).map((p) => [p.externalVariantId, p.imageUrl])
-  );
-
-  return (
-    <div className="mt-8">
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 rounded-full bg-purple-50 flex items-center justify-center">
-          <svg className="w-4 h-4 text-purple-600" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M10 2a4 4 0 00-4 4v1H5a1 1 0 00-.994.89l-1 9A1 1 0 004 18h12a1 1 0 00.994-1.11l-1-9A1 1 0 0015 7h-1V6a4 4 0 00-4-4zm2 5V6a2 2 0 10-4 0v1h4zm-6 3a1 1 0 112 0 1 1 0 01-2 0zm7-1a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
-          </svg>
-        </div>
-        <h3 className="font-display text-lg font-bold text-stone-900">Your Add-Ons</h3>
-        <span className="text-xs font-semibold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
-          {items.length}
-        </span>
-      </div>
-
-      <div className="card divide-y divide-stone-100 overflow-hidden">
-        {items.map((item) => (
-          <AddedAddonRow
-            key={item.purchase_item_id}
-            item={item}
-            imageByVariantId={imageByVariantId}
-            locked={locked}
-            scheduledAt={scheduledAt}
-            bundleVariantId={bundleVariantId}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
+// ─── Added add-on row (onetime line item) ─────────────────────────────────────
 
 function AddedAddonRow({
   item,
@@ -2290,170 +2675,6 @@ function AddedAddonRow({
           )}
         </button>
       )}
-    </div>
-  );
-}
-
-// ─── Add-ons carousel ─────────────────────────────────────────────────────────
-
-function AddOnsCarousel({
-  products,
-  addressId,
-  scheduledAt,
-  bundleVariantId,
-  locked = false,
-}: {
-  products: AddonProduct[];
-  addressId: number;
-  scheduledAt: string;
-  bundleVariantId: string;
-  locked?: boolean;
-}) {
-  if (products.length === 0) return null;
-
-  return (
-    <div className="mt-8">
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 rounded-full bg-amber-50 flex items-center justify-center">
-          <svg className="w-4 h-4 text-amber-600" viewBox="0 0 20 20" fill="currentColor">
-            <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
-          </svg>
-        </div>
-        <h3 className="font-display text-lg font-bold text-stone-900">Add Something Extra</h3>
-      </div>
-
-      <div className="flex gap-4 overflow-x-auto pb-4 snap-x snap-mandatory scrollbar-hide -mx-1 px-1">
-        {products.map((product) => (
-          <AddOnCard
-            key={product.externalVariantId}
-            product={product}
-            addressId={addressId}
-            scheduledAt={scheduledAt}
-            bundleVariantId={bundleVariantId}
-            locked={locked}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function AddOnCard({
-  product,
-  addressId,
-  scheduledAt,
-  bundleVariantId,
-  locked = false,
-}: {
-  product: AddonProduct;
-  addressId: number;
-  scheduledAt: string;
-  bundleVariantId: string;
-  locked?: boolean;
-}) {
-  const fetcher = useFetcher<typeof action>();
-  const isAdding = fetcher.state !== "idle";
-  const fetcherData = fetcher.data as
-    | { success: true; intent: "add_addon" }
-    | { error: string; intent: "add_addon" }
-    | undefined;
-  const wasAdded = fetcher.state === "idle" && fetcherData != null && "success" in fetcherData;
-  const addError = fetcher.state === "idle" && fetcherData != null && "error" in fetcherData
-    ? (fetcherData as { error: string }).error
-    : null;
-
-  const handleAdd = () => {
-    fetcher.submit(
-      {
-        intent: "add_addon",
-        bundleVariantId,
-        addressId: String(addressId),
-        scheduledAt,
-        externalProductId: product.externalProductId,
-        externalVariantId: product.externalVariantId,
-        price: product.price,
-        quantity: "1",
-      },
-      { method: "post" }
-    );
-  };
-
-  return (
-    <div className="card flex flex-col flex-none w-44 sm:w-48 snap-start overflow-hidden transition-all duration-200 hover:-translate-y-0.5">
-      <div className="relative aspect-square bg-stone-50 overflow-hidden flex-none">
-        {product.imageUrl ? (
-          <img
-            src={product.imageUrl}
-            alt={product.title}
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-stone-50 to-stone-100">
-            <svg className="w-10 h-10 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </div>
-        )}
-      </div>
-
-      <div className="flex flex-col flex-1 p-3 text-center">
-        <h4 className="text-sm font-semibold text-stone-800 leading-tight line-clamp-2">
-          {product.title}
-        </h4>
-        {product.variantTitle && product.variantTitle !== "Default Title" && (
-          <p className="text-xs text-stone-400 line-clamp-1 mt-1">{product.variantTitle}</p>
-        )}
-        <p className="text-sm font-bold text-stone-900 mt-1">
-          {formatCurrency(product.price)}
-        </p>
-
-        <div className="mt-auto pt-2">
-        {locked ? (
-          <p className="py-2 text-xs text-stone-400 font-medium">Unavailable</p>
-        ) : wasAdded ? (
-          <div className="flex items-center justify-center gap-1 py-2">
-            <svg className="w-4 h-4 animate-check-pop" style={{ color: "#22c55e" }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-            <span className="text-sm font-medium" style={{ color: "#16a34a" }}>Added!</span>
-          </div>
-        ) : addError ? (
-          <div className="space-y-1">
-            <p className="text-xs text-red-600 line-clamp-2">{addError}</p>
-            <button
-              onClick={handleAdd}
-              className="w-full py-2 text-sm font-semibold text-white rounded-lg transition-colors"
-              style={{ backgroundColor: "#22c55e" }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#16a34a"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#22c55e"; }}
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={handleAdd}
-            disabled={isAdding}
-            className="w-full py-2 text-sm font-semibold text-white rounded-lg transition-colors disabled:opacity-50"
-            style={{ backgroundColor: "#22c55e" }}
-            onMouseEnter={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#16a34a"; }}
-            onMouseLeave={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#22c55e"; }}
-          >
-            {isAdding ? (
-              <span className="flex items-center justify-center gap-1.5">
-                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Adding...
-              </span>
-            ) : (
-              "Add to Order"
-            )}
-          </button>
-        )}
-        </div>
-      </div>
     </div>
   );
 }

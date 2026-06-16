@@ -1,6 +1,7 @@
 {
   "name": "future-charge-manipulation-demo-portal",
   "private": true,
+  "license": "MIT",
   "sideEffects": false,
   "type": "module",
   "scripts": {

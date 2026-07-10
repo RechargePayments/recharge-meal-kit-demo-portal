@@ -133,11 +133,26 @@ export async function getSubscription(subscriptionId: number): Promise<Subscript
   return SubscriptionSchema.parse(data.subscription);
 }
 
-export async function listSubscriptions(customerId: string): Promise<Subscription[]> {
+export async function listSubscriptions(
+  customerId: string,
+  status: string | null = "active"
+): Promise<Subscription[]> {
+  const statusParam = status ? `&status=${status}` : "";
   const data = await api<{ subscriptions: unknown[] }>(
-    `/subscriptions?customer_id=${customerId}&status=active&limit=50`
+    `/subscriptions?customer_id=${customerId}${statusParam}&limit=50`
   );
   return z.array(SubscriptionSchema).parse(data.subscriptions);
+}
+
+// Reactivates a cancelled subscription via the Admin API. Unlike the churn
+// cancellation flow (which needs a customer session token), this uses the store
+// Admin key, so it works for any customer — including the demo-bypass customer.
+export async function activateSubscription(subscriptionId: number): Promise<Subscription> {
+  const data = await api<{ subscription: unknown }>(
+    `/subscriptions/${subscriptionId}/activate`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  return SubscriptionSchema.parse(data.subscription);
 }
 
 // ─── Charges ──────────────────────────────────────────────────────────────────

@@ -1,38 +1,60 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
-import { json } from "@remix-run/node";
+import { json, redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
+  activateSubscription,
   getCustomer,
+  getSubscription,
   listAddresses,
   listPaymentMethods,
+  listSubscriptions,
   sendPaymentUpdateNotification,
   updateAddress,
   updateCustomer,
 } from "~/lib/recharge.server";
-import { requireCustomerOwnsId } from "~/lib/auth.server";
-import type { Address, Customer, PaymentMethod } from "~/lib/types";
+import {
+  getCancellationSurveyUrl,
+  isDemoBypassSession,
+  requireCustomerOwnsId,
+} from "~/lib/auth.server";
+import type { Address, Customer, PaymentMethod, Subscription } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Account" }];
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
+// The subset of the subscription the account page needs. Selected from the
+// customer's subscriptions regardless of status so a cancelled subscription can
+// still be shown with a Reactivate option.
+type AccountSubscription = Pick<Subscription, "id" | "product_title" | "status">;
+
+function selectPrimarySubscription(subscriptions: Subscription[]): AccountSubscription | null {
+  const active = subscriptions.find((s) => s.status === "active");
+  // Fall back to the most recent (highest id) cancelled/expired subscription.
+  const primary = active ?? [...subscriptions].sort((a, b) => b.id - a.id)[0] ?? null;
+  if (!primary) return null;
+  return { id: primary.id, product_title: primary.product_title, status: primary.status };
+}
+
 export async function loader({ params, request }: LoaderFunctionArgs) {
   const customerId = params.customerId!;
   await requireCustomerOwnsId(request, customerId);
-  const [customer, addresses, paymentMethods] = await Promise.all([
+  const [customer, addresses, paymentMethods, subscriptions] = await Promise.all([
     getCustomer(customerId),
     listAddresses(customerId),
     listPaymentMethods(customerId),
+    listSubscriptions(customerId, null),
   ]);
-  return json({ customer, addresses, paymentMethods });
+  const subscription = selectPrimarySubscription(subscriptions);
+  return json({ customer, addresses, paymentMethods, subscription });
 }
 
 // ─── Action ──────────────────────────────────────────────────────────────────
 
 export async function action({ request, params }: ActionFunctionArgs) {
   const customerId = params.customerId!;
-  await requireCustomerOwnsId(request, customerId);
+  const auth = await requireCustomerOwnsId(request, customerId);
   const formData = await request.formData();
   const intent = formData.get("intent");
 
@@ -94,13 +116,58 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
   }
 
+  if (intent === "cancel_subscription") {
+    const subscriptionId = formData.get("subscriptionId");
+    if (typeof subscriptionId !== "string") {
+      return json({ error: "Missing subscriptionId", intent: "cancel_subscription" as const }, { status: 400 });
+    }
+    if (isDemoBypassSession(auth)) {
+      return json({
+        error: "Cancellation isn't available in demo mode. Log in as a real customer to use the cancellation flow.",
+        intent: "cancel_subscription" as const,
+      });
+    }
+    try {
+      const sub = await getSubscription(Number(subscriptionId));
+      if (sub.customer_id !== Number(customerId) || sub.status !== "active") {
+        throw new Response("Not Found", { status: 404 });
+      }
+      const origin = new URL(request.url).origin;
+      const surveyUrl = await getCancellationSurveyUrl(auth.rechargeSession, sub.id, `${origin}/${customerId}`);
+      return redirect(surveyUrl);
+    } catch (err) {
+      if (err instanceof Response) throw err;
+      const message = err instanceof Error ? err.message : "Couldn't start cancellation, please try again.";
+      return json({ error: message, intent: "cancel_subscription" as const });
+    }
+  }
+
+  if (intent === "reactivate_subscription") {
+    const subscriptionId = formData.get("subscriptionId");
+    if (typeof subscriptionId !== "string") {
+      return json({ error: "Missing subscriptionId", intent: "reactivate_subscription" as const }, { status: 400 });
+    }
+    try {
+      const sub = await getSubscription(Number(subscriptionId));
+      if (sub.customer_id !== Number(customerId) || sub.status !== "cancelled") {
+        throw new Response("Not Found", { status: 404 });
+      }
+      await activateSubscription(sub.id);
+      return redirect(`/${customerId}`);
+    } catch (err) {
+      if (err instanceof Response) throw err;
+      const message = err instanceof Error ? err.message : "Couldn't reactivate, please try again.";
+      return json({ error: message, intent: "reactivate_subscription" as const });
+    }
+  }
+
   return json({ error: "Unknown intent" }, { status: 400 });
 }
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function AccountPage() {
-  const { customer, addresses, paymentMethods } = useLoaderData<typeof loader>();
+  const { customer, addresses, paymentMethods, subscription } = useLoaderData<typeof loader>();
 
   const [editingProfile, setEditingProfile] = useState(false);
   const [editingAddress, setEditingAddress] = useState<Address | null>(null);
@@ -247,6 +314,9 @@ export default function AccountPage() {
             </div>
           )}
         </section>
+
+        {/* ── Subscription ── */}
+        {subscription && <SubscriptionSection subscription={subscription} />}
       </main>
 
       {editingProfile && (
@@ -266,6 +336,71 @@ export default function AccountPage() {
         />
       )}
     </div>
+  );
+}
+
+// ─── Subscription section ────────────────────────────────────────────────────
+
+function SubscriptionStatusBadge({ status }: { status: AccountSubscription["status"] }) {
+  const styles: Record<AccountSubscription["status"], string> = {
+    active: "bg-brand-100 text-brand-700",
+    cancelled: "bg-red-50 text-red-600",
+    expired: "bg-stone-100 text-stone-500",
+  };
+  const label = { active: "Active", cancelled: "Cancelled", expired: "Expired" }[status];
+  return <span className={`badge mt-1 ${styles[status]}`}>{label}</span>;
+}
+
+function SubscriptionSection({ subscription }: { subscription: AccountSubscription }) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const submittingIntent = fetcher.formData?.get("intent");
+  const error =
+    fetcher.data != null && "error" in fetcher.data ? (fetcher.data as { error: string }).error : null;
+
+  return (
+    <section className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
+      <div className="flex items-center gap-2 px-6 py-4 border-b border-stone-100">
+        <svg className="w-5 h-5 text-brand-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
+        </svg>
+        <h2 className="font-display font-semibold text-stone-900">Subscription</h2>
+      </div>
+      <div className="px-6 py-5">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-stone-900 truncate">{subscription.product_title}</p>
+            <SubscriptionStatusBadge status={subscription.status} />
+          </div>
+
+          {subscription.status === "active" && (
+            <fetcher.Form method="post" className="shrink-0">
+              <input type="hidden" name="intent" value="cancel_subscription" />
+              <input type="hidden" name="subscriptionId" value={subscription.id} />
+              <button
+                type="submit"
+                disabled={busy}
+                className="text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors disabled:opacity-60"
+              >
+                {busy && submittingIntent === "cancel_subscription" ? "Starting…" : "Cancel subscription"}
+              </button>
+            </fetcher.Form>
+          )}
+
+          {subscription.status === "cancelled" && (
+            <fetcher.Form method="post" className="shrink-0">
+              <input type="hidden" name="intent" value="reactivate_subscription" />
+              <input type="hidden" name="subscriptionId" value={subscription.id} />
+              <button type="submit" disabled={busy} className="btn-primary text-sm px-4 py-2">
+                {busy && submittingIntent === "reactivate_subscription" ? "Reactivating…" : "Reactivate"}
+              </button>
+            </fetcher.Form>
+          )}
+        </div>
+
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+      </div>
+    </section>
   );
 }
 

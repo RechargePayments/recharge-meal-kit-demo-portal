@@ -133,11 +133,40 @@ export async function getSubscription(subscriptionId: number): Promise<Subscript
   return SubscriptionSchema.parse(data.subscription);
 }
 
-export async function listSubscriptions(customerId: string): Promise<Subscription[]> {
+export async function listSubscriptions(
+  customerId: string,
+  status: string | null = "active"
+): Promise<Subscription[]> {
+  const statusParam = status ? `&status=${status}` : "";
   const data = await api<{ subscriptions: unknown[] }>(
-    `/subscriptions?customer_id=${customerId}&status=active&limit=50`
+    `/subscriptions?customer_id=${customerId}${statusParam}&limit=50`
   );
   return z.array(SubscriptionSchema).parse(data.subscriptions);
+}
+
+// Reactivates a cancelled subscription via the Admin API. Unlike the churn
+// cancellation flow (which needs a customer session token), this uses the store
+// Admin key, so it works for any customer — including the demo-bypass customer.
+export async function activateSubscription(subscriptionId: number): Promise<Subscription> {
+  const data = await api<{ subscription: unknown }>(
+    `/subscriptions/${subscriptionId}/activate`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  return SubscriptionSchema.parse(data.subscription);
+}
+
+// Directly cancels a subscription via the Admin API, bypassing the hosted churn
+// survey. Used for the demo-bypass customer, which can't authenticate the SDK
+// call that drives the survey.
+export async function cancelSubscription(
+  subscriptionId: number,
+  reason = "Cancelled from demo portal"
+): Promise<Subscription> {
+  const data = await api<{ subscription: unknown }>(
+    `/subscriptions/${subscriptionId}/cancel`,
+    { method: "POST", body: JSON.stringify({ cancellation_reason: reason }) }
+  );
+  return SubscriptionSchema.parse(data.subscription);
 }
 
 // ─── Charges ──────────────────────────────────────────────────────────────────

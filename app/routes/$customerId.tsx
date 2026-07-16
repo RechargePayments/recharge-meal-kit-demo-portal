@@ -1,8 +1,9 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
-import { json } from "@remix-run/node";
+import { json, redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData, useNavigation, useRevalidator, useSearchParams } from "@remix-run/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  activateSubscription,
   getCustomer,
   getCreditSummary,
   createBundleSelection,
@@ -196,7 +197,45 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     }
   }
 
+  // Pass 3 — a bundle subscription may have active charges with NO bundle_selection
+  // at all (e.g. right after reactivation, which regenerates the charges without
+  // selections). Passes 1–2 bootstrap discovery from existing selections, so they
+  // miss this case entirely and the dashboard falls back to the read-only list.
+  // Seed discovery from the customer's active bundle subscriptions so the editable
+  // grid still renders (via the synthetic placeholder selection built below).
+  const bundleProducts = await listBundleProducts();
+  const bundleProductIds = new Set(bundleProducts.map((p) => p.external_product_id));
+  for (const subscription of subscriptions) {
+    const subProductId = subscription.external_product_id?.ecommerce;
+    if (!subProductId || !bundleProductIds.has(subProductId)) continue;
+    for (const { charge } of chargesBundleCheck) {
+      if (
+        charge.line_items.some(
+          (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === subscription.id
+        )
+      ) {
+        registerChargeForSubscription(subscription.id, charge.id);
+      }
+    }
+  }
+
   const bundleSubscriptions = Array.from(bundleSubscriptionMap.values());
+
+  // If the customer has no active bundle subscription, surface the most recent
+  // cancelled bundle subscription so the dashboard can offer reactivation.
+  let reactivatableSubscription: { id: number; productTitle: string } | null = null;
+  if (bundleSubscriptions.length === 0) {
+    const cancelledSubscriptions = await listSubscriptions(customerId, "cancelled");
+    const cancelledBundle = cancelledSubscriptions
+      .filter((s) => {
+        const pid = s.external_product_id?.ecommerce;
+        return pid != null && bundleProductIds.has(pid);
+      })
+      .sort((a, b) => b.id - a.id)[0];
+    if (cancelledBundle) {
+      reactivatableSubscription = { id: cancelledBundle.id, productTitle: cancelledBundle.product_title };
+    }
+  }
   const requestedSubscriptionId =
     selectedSubscription != null && /^\d+$/.test(selectedSubscription)
       ? Number(selectedSubscription)
@@ -291,7 +330,6 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
       const bundleProductInfoList = await Promise.all(uniqueProductIds.map(getBundleProductInfo));
 
       const weekStart = getMondayOf(charge.scheduled_at);
-      const bundleProducts = await listBundleProducts();
       const activeBundleProductId =
         bundleProducts.find((p) =>
           p.variants.some((v) => v.external_variant_id === activeBundleVariantId)
@@ -370,6 +408,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     subscriptions,
     activeCharges,
     bundleSubscriptions,
+    reactivatableSubscription,
     activeSubscriptionId: activeSubscription?.purchaseItemId ?? null,
     activeBundleVariantId,
     chargeTabs,
@@ -412,6 +451,25 @@ export async function action({ params, request }: ActionFunctionArgs) {
     const offset = getDeliveryDateOffset(resolvedBundleVariantId);
     const window = getModificationWindowDays(resolvedBundleVariantId);
     return isChargeLocked(scheduledAt, offset, window);
+  }
+
+  if (intent === "reactivate_subscription") {
+    const subscriptionId = formData.get("subscriptionId");
+    if (typeof subscriptionId !== "string") {
+      return json({ error: "Missing subscriptionId", intent: "reactivate_subscription" as const }, { status: 400 });
+    }
+    try {
+      const sub = await getSubscription(Number(subscriptionId));
+      if (sub.customer_id !== Number(customerId) || sub.status !== "cancelled") {
+        throw new Response("Not Found", { status: 404 });
+      }
+      await activateSubscription(sub.id);
+      return redirect(`/${customerId}`);
+    } catch (err) {
+      if (err instanceof Response) throw err;
+      const message = err instanceof Error ? err.message : "Couldn't reactivate, please try again.";
+      return json({ error: message, intent: "reactivate_subscription" as const });
+    }
   }
 
   if (intent === "update_bundle") {
@@ -668,6 +726,7 @@ export default function Dashboard() {
     subscriptions,
     activeCharges,
     bundleSubscriptions,
+    reactivatableSubscription,
     activeSubscriptionId,
     activeBundleVariantId,
     chargeTabs,
@@ -811,6 +870,8 @@ export default function Dashboard() {
             modificationWindowDays={modificationWindowDays}
             bundleVariantId={activeBundleVariantId}
           />
+        ) : reactivatableSubscription ? (
+          <ReactivatePrompt subscription={reactivatableSubscription} />
         ) : (
           <EmptyState />
         )}
@@ -2845,6 +2906,35 @@ function EmptyState() {
       </div>
       <h3 className="font-display font-semibold text-stone-700 mb-1">No upcoming deliveries</h3>
       <p className="text-sm text-stone-400">Your next delivery hasn't been scheduled yet.</p>
+    </div>
+  );
+}
+
+function ReactivatePrompt({ subscription }: { subscription: { id: number; productTitle: string } }) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const error =
+    fetcher.data != null && "error" in fetcher.data ? (fetcher.data as { error: string }).error : null;
+
+  return (
+    <div className="card p-16 text-center">
+      <div className="w-16 h-16 rounded-full bg-stone-100 flex items-center justify-center mx-auto mb-4">
+        <svg className="w-8 h-8 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+        </svg>
+      </div>
+      <h3 className="font-display font-semibold text-stone-700 mb-1">Your subscription is cancelled</h3>
+      <p className="text-sm text-stone-400 mb-5">
+        {subscription.productTitle} is currently cancelled. Reactivate it to start choosing meals again.
+      </p>
+      <fetcher.Form method="post">
+        <input type="hidden" name="intent" value="reactivate_subscription" />
+        <input type="hidden" name="subscriptionId" value={subscription.id} />
+        <button type="submit" disabled={busy} className="btn-primary text-sm px-5 py-2">
+          {busy ? "Reactivating…" : "Reactivate subscription"}
+        </button>
+      </fetcher.Form>
+      {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
     </div>
   );
 }

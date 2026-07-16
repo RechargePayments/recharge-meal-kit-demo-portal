@@ -1,5 +1,6 @@
 import { redirect } from "@remix-run/node";
 import {
+  getActiveChurnLandingPageURL,
   initRecharge,
   sendPasswordlessCode,
   validatePasswordlessCode,
@@ -46,14 +47,22 @@ export type ResolvedCustomerSession = {
 
 const DEMO_BYPASS_EMAIL = "demo-customer@rechargeapps.com";
 const DEMO_BYPASS_CUSTOMER_ID = "252481964";
+// The demo-bypass session carries this placeholder in place of a real,
+// Recharge-issued customer apiToken. Storefront-client SDK calls authenticate
+// with the customer token, so they cannot be made from a demo-bypass session.
+export const DEMO_BYPASS_API_TOKEN = "demo-bypass";
 
 export function isDemoBypassEmail(email: string): boolean {
   return email.trim().toLowerCase() === DEMO_BYPASS_EMAIL;
 }
 
+export function isDemoBypassSession(auth: { apiToken: string }): boolean {
+  return auth.apiToken === DEMO_BYPASS_API_TOKEN;
+}
+
 export function buildDemoBypassSession(): ResolvedCustomerSession {
   return {
-    apiToken: "demo-bypass",
+    apiToken: DEMO_BYPASS_API_TOKEN,
     customerId: DEMO_BYPASS_CUSTOMER_ID,
     // Long-lived so demos aren't interrupted by the 55-min TTL.
     apiTokenExpiresAt: Date.now() + 1000 * 60 * 60 * 24 * 7,
@@ -138,6 +147,22 @@ export async function getOptionalCustomer(
     email,
     rechargeSession: { apiToken, customerId },
   };
+}
+
+/**
+ * Returns the URL of Recharge's hosted cancellation-prevention ("active churn")
+ * survey for a subscription. The survey presents retention offers and handles the
+ * actual cancellation; on completion it returns the customer to `redirectURL`.
+ *
+ * Requires a real customer session token — cannot be called from a demo-bypass
+ * session (see `isDemoBypassSession`).
+ */
+export async function getCancellationSurveyUrl(
+  session: RechargeSession,
+  subscriptionId: number,
+  redirectURL: string
+): Promise<string> {
+  return getActiveChurnLandingPageURL(session, subscriptionId, redirectURL);
 }
 
 export { getSession, commitSession, destroySession };

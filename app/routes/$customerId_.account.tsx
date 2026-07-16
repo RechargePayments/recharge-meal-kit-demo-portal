@@ -4,6 +4,7 @@ import { Link, useFetcher, useLoaderData } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
   activateSubscription,
+  cancelSubscription,
   getCustomer,
   getSubscription,
   listAddresses,
@@ -39,7 +40,7 @@ function selectPrimarySubscription(subscriptions: Subscription[]): AccountSubscr
 
 export async function loader({ params, request }: LoaderFunctionArgs) {
   const customerId = params.customerId!;
-  await requireCustomerOwnsId(request, customerId);
+  const auth = await requireCustomerOwnsId(request, customerId);
   const [customer, addresses, paymentMethods, subscriptions] = await Promise.all([
     getCustomer(customerId),
     listAddresses(customerId),
@@ -47,7 +48,10 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     listSubscriptions(customerId, null),
   ]);
   const subscription = selectPrimarySubscription(subscriptions);
-  return json({ customer, addresses, paymentMethods, subscription });
+  // The demo-bypass session can't reach the hosted churn survey (no real customer
+  // token), so the UI offers a simple confirm-and-cancel dialog instead.
+  const isDemoSession = isDemoBypassSession(auth);
+  return json({ customer, addresses, paymentMethods, subscription, isDemoSession });
 }
 
 // ─── Action ──────────────────────────────────────────────────────────────────
@@ -142,6 +146,30 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
   }
 
+  if (intent === "cancel_subscription_demo") {
+    const subscriptionId = formData.get("subscriptionId");
+    if (typeof subscriptionId !== "string") {
+      return json({ error: "Missing subscriptionId", intent: "cancel_subscription_demo" as const }, { status: 400 });
+    }
+    // Direct cancel (no churn survey) is only for the demo-bypass session; real
+    // customers must go through the hosted survey.
+    if (!isDemoBypassSession(auth)) {
+      throw new Response("Not Found", { status: 404 });
+    }
+    try {
+      const sub = await getSubscription(Number(subscriptionId));
+      if (sub.customer_id !== Number(customerId) || sub.status !== "active") {
+        throw new Response("Not Found", { status: 404 });
+      }
+      await cancelSubscription(sub.id);
+      return json({ success: true, intent: "cancel_subscription_demo" as const });
+    } catch (err) {
+      if (err instanceof Response) throw err;
+      const message = err instanceof Error ? err.message : "Couldn't cancel, please try again.";
+      return json({ error: message, intent: "cancel_subscription_demo" as const });
+    }
+  }
+
   if (intent === "reactivate_subscription") {
     const subscriptionId = formData.get("subscriptionId");
     if (typeof subscriptionId !== "string") {
@@ -167,7 +195,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function AccountPage() {
-  const { customer, addresses, paymentMethods, subscription } = useLoaderData<typeof loader>();
+  const { customer, addresses, paymentMethods, subscription, isDemoSession } = useLoaderData<typeof loader>();
 
   const [editingProfile, setEditingProfile] = useState(false);
   const [editingAddress, setEditingAddress] = useState<Address | null>(null);
@@ -316,7 +344,7 @@ export default function AccountPage() {
         </section>
 
         {/* ── Subscription ── */}
-        {subscription && <SubscriptionSection subscription={subscription} />}
+        {subscription && <SubscriptionSection subscription={subscription} isDemoSession={isDemoSession} />}
       </main>
 
       {editingProfile && (
@@ -351,12 +379,33 @@ function SubscriptionStatusBadge({ status }: { status: AccountSubscription["stat
   return <span className={`badge mt-1 ${styles[status]}`}>{label}</span>;
 }
 
-function SubscriptionSection({ subscription }: { subscription: AccountSubscription }) {
+function SubscriptionSection({
+  subscription,
+  isDemoSession,
+}: {
+  subscription: AccountSubscription;
+  isDemoSession: boolean;
+}) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
   const submittingIntent = fetcher.formData?.get("intent");
   const error =
     fetcher.data != null && "error" in fetcher.data ? (fetcher.data as { error: string }).error : null;
+
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  // Close the confirm dialog once the demo cancel succeeds (the loader
+  // revalidates and the section flips to the cancelled state).
+  useEffect(() => {
+    if (
+      fetcher.state === "idle" &&
+      fetcher.data != null &&
+      "success" in fetcher.data &&
+      (fetcher.data as { intent?: string }).intent === "cancel_subscription_demo"
+    ) {
+      setConfirmingCancel(false);
+    }
+  }, [fetcher.state, fetcher.data]);
 
   return (
     <section className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
@@ -373,19 +422,31 @@ function SubscriptionSection({ subscription }: { subscription: AccountSubscripti
             <SubscriptionStatusBadge status={subscription.status} />
           </div>
 
-          {subscription.status === "active" && (
-            <fetcher.Form method="post" className="shrink-0">
-              <input type="hidden" name="intent" value="cancel_subscription" />
-              <input type="hidden" name="subscriptionId" value={subscription.id} />
+          {subscription.status === "active" &&
+            (isDemoSession ? (
+              // The demo-bypass session can't reach the hosted churn survey, so
+              // offer a simple confirm-and-cancel dialog instead of redirecting.
               <button
-                type="submit"
+                type="button"
+                onClick={() => setConfirmingCancel(true)}
                 disabled={busy}
-                className="text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors disabled:opacity-60"
+                className="shrink-0 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors disabled:opacity-60"
               >
-                {busy && submittingIntent === "cancel_subscription" ? "Starting…" : "Cancel subscription"}
+                Cancel subscription
               </button>
-            </fetcher.Form>
-          )}
+            ) : (
+              <fetcher.Form method="post" className="shrink-0">
+                <input type="hidden" name="intent" value="cancel_subscription" />
+                <input type="hidden" name="subscriptionId" value={subscription.id} />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors disabled:opacity-60"
+                >
+                  {busy && submittingIntent === "cancel_subscription" ? "Starting…" : "Cancel subscription"}
+                </button>
+              </fetcher.Form>
+            ))}
 
           {subscription.status === "cancelled" && (
             <fetcher.Form method="post" className="shrink-0">
@@ -398,8 +459,40 @@ function SubscriptionSection({ subscription }: { subscription: AccountSubscripti
           )}
         </div>
 
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+        {error && !confirmingCancel && <p className="mt-3 text-sm text-red-600">{error}</p>}
       </div>
+
+      {confirmingCancel && (
+        <ModalShell title="Cancel subscription" onClose={() => { if (!busy) setConfirmingCancel(false); }}>
+          <div className="px-6 py-5">
+            <p className="text-sm text-stone-600">
+              Do you want to cancel your subscription? You can reactivate it anytime.
+            </p>
+            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+            <div className="flex items-center gap-3 mt-5">
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="cancel_subscription_demo" />
+                <input type="hidden" name="subscriptionId" value={subscription.id} />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex items-center rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white hover:bg-red-700 transition-colors disabled:opacity-60"
+                >
+                  {busy && submittingIntent === "cancel_subscription_demo" ? "Cancelling…" : "Yes, cancel"}
+                </button>
+              </fetcher.Form>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmingCancel(false)}
+                className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
+              >
+                Keep subscription
+              </button>
+            </div>
+          </div>
+        </ModalShell>
+      )}
     </section>
   );
 }

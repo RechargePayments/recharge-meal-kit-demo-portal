@@ -155,6 +155,20 @@ export async function activateSubscription(subscriptionId: number): Promise<Subs
   return SubscriptionSchema.parse(data.subscription);
 }
 
+// Directly cancels a subscription via the Admin API, bypassing the hosted churn
+// survey. Used for the demo-bypass customer, which can't authenticate the SDK
+// call that drives the survey.
+export async function cancelSubscription(
+  subscriptionId: number,
+  reason = "Cancelled from demo portal"
+): Promise<Subscription> {
+  const data = await api<{ subscription: unknown }>(
+    `/subscriptions/${subscriptionId}/cancel`,
+    { method: "POST", body: JSON.stringify({ cancellation_reason: reason }) }
+  );
+  return SubscriptionSchema.parse(data.subscription);
+}
+
 // ─── Charges ──────────────────────────────────────────────────────────────────
 
 export async function listQueuedCharges(customerId: string): Promise<Charge[]> {

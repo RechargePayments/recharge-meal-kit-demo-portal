@@ -841,7 +841,8 @@ export default function Dashboard() {
                   scheduledAt={activeCharge.scheduled_at}
                   deliveryDateOffset={deliveryDateOffset}
                   mealsSelected={0}
-                  mealsTarget={MEALS_PER_WEEK}
+                  minMeals={MEALS_PER_WEEK}
+                  maxMeals={MEALS_PER_WEEK}
                   frequency={frequencyLabel(activeSub)}
                   skipped
                 />
@@ -937,6 +938,11 @@ function WeekView({
   const initialCount = primary ? primary.items.reduce((sum, item) => sum + item.quantity, 0) : 0;
   const [mealsSelected, setMealsSelected] = useState(initialCount);
 
+  const quantityRanges = primary?.external_product_id
+    ? (activeBundle.bundleProductRangesByProductId[primary.external_product_id] ?? [])
+    : [];
+  const { min: minMeals, max: maxMeals } = mealCountRange(quantityRanges);
+
   return (
     <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
       <div className="lg:col-span-2 space-y-6">
@@ -944,7 +950,8 @@ function WeekView({
           scheduledAt={charge.scheduled_at}
           deliveryDateOffset={deliveryDateOffset}
           mealsSelected={mealsSelected}
-          mealsTarget={MEALS_PER_WEEK}
+          minMeals={minMeals}
+          maxMeals={maxMeals}
           frequency={subscriptionFrequency}
           skipped={isSkipped}
           editHref={`/${customerId}/account`}
@@ -983,6 +990,8 @@ function WeekView({
         <div>
           <MealsHeader
             mealsSelected={mealsSelected}
+            minMeals={minMeals}
+            maxMeals={maxMeals}
             preferences={preferences}
             customerId={customerId}
           />
@@ -993,7 +1002,7 @@ function WeekView({
               charge={charge}
               bundleSelection={primary}
               availableCollections={primary.external_product_id ? (activeBundle.collectionsByProductId[primary.external_product_id] ?? []) : []}
-              quantityRanges={primary.external_product_id ? (activeBundle.bundleProductRangesByProductId[primary.external_product_id] ?? []) : []}
+              quantityRanges={quantityRanges}
               preferences={preferences}
               eligibleCollectionIds={activeBundle.eligibleCollectionIds}
               hasPresetForWeek={activeBundle.hasPresetForWeek}
@@ -1027,11 +1036,38 @@ function WeekView({
 
 // ─── Next delivery hero card ──────────────────────────────────────────────────
 
+// Derive the allowed meal-count envelope from a bundle's quantity ranges.
+// quantityRanges is a list of [min, max] pairs; we collapse it to the overall
+// min/max. Falls back to MEALS_PER_WEEK when the bundle exposes no ranges.
+function mealCountRange(quantityRanges: number[][]): { min: number; max: number } {
+  if (quantityRanges.length === 0) return { min: MEALS_PER_WEEK, max: MEALS_PER_WEEK };
+  return {
+    min: Math.min(...quantityRanges.map(([min]) => min)),
+    max: Math.max(...quantityRanges.map(([, max]) => max)),
+  };
+}
+
+// Formats an allowed range for display: "3-5" for a range, "5" when fixed.
+function mealRangeLabel(min: number, max: number): string {
+  return min === max ? `${max}` : `${min}-${max}`;
+}
+
+// Contextual helper text under the next-delivery progress bar: nudge to reach
+// the minimum while under it, then invite adding up to the maximum, then confirm.
+function mealHelperText(count: number, min: number, max: number): string {
+  // Fixed-size bundle (min === max): "at least" is misleading, so say exactly.
+  if (count < min) return min === max ? `Select ${min} meals` : `Select at least ${min} meals`;
+  if (count >= max) return "All meals selected";
+  const remaining = max - count;
+  return `Add up to ${remaining} more ${remaining === 1 ? "meal" : "meals"}`;
+}
+
 function NextDeliveryCard({
   scheduledAt,
   deliveryDateOffset,
   mealsSelected,
-  mealsTarget,
+  minMeals,
+  maxMeals,
   frequency,
   skipped = false,
   editHref,
@@ -1039,14 +1075,19 @@ function NextDeliveryCard({
   scheduledAt: string;
   deliveryDateOffset: number;
   mealsSelected: number;
-  mealsTarget: number;
+  minMeals: number;
+  maxMeals: number;
   frequency: string | null;
   skipped?: boolean;
   editHref?: string;
 }) {
   const deliveryDate = addDaysToDate(scheduledAt, deliveryDateOffset);
-  const complete = mealsSelected === mealsTarget && mealsTarget > 0;
-  const pct = mealsTarget > 0 ? Math.min(100, (mealsSelected / mealsTarget) * 100) : 0;
+  // "Complete" (green) means the selection is within the allowed range, not
+  // exactly max — so 3-5 meals all read as valid.
+  const complete = maxMeals > 0 && mealsSelected >= minMeals && mealsSelected <= maxMeals;
+  // Fill tracks progress toward the minimum required, so the bar reads full &
+  // green as soon as the selection is valid/savable (3 of 3-5 = 100%).
+  const pct = minMeals > 0 ? Math.min(100, (mealsSelected / minMeals) * 100) : 0;
 
   return (
     <div className="card p-5 sm:p-6">
@@ -1063,7 +1104,7 @@ function NextDeliveryCard({
           <span
             className={`badge ${complete ? "bg-brand-100 text-brand-700" : "bg-amber-100 text-amber-700"}`}
           >
-            {mealsSelected}/{mealsTarget} meals
+            {mealsSelected} of {maxMeals} meals
           </span>
           {editHref && (
             <Link to={editHref} className="text-sm font-medium text-stone-500 hover:text-brand-700 transition-colors">
@@ -1086,6 +1127,12 @@ function NextDeliveryCard({
           }}
         />
       </div>
+
+      {!skipped && (
+        <p className={`mt-2 text-xs font-medium ${complete ? "text-stone-400" : "text-amber-600"}`}>
+          {mealHelperText(mealsSelected, minMeals, maxMeals)}
+        </p>
+      )}
     </div>
   );
 }
@@ -1094,10 +1141,14 @@ function NextDeliveryCard({
 
 function MealsHeader({
   mealsSelected,
+  minMeals,
+  maxMeals,
   preferences,
   customerId,
 }: {
   mealsSelected: number;
+  minMeals: number;
+  maxMeals: number;
   preferences: CustomerPreference | null;
   customerId: string;
 }) {
@@ -1158,7 +1209,7 @@ function MealsHeader({
         <h2 className="font-display text-xl font-bold text-stone-900">
           Your meals
           <span className="ml-2 text-sm font-medium text-stone-400">
-            · {mealsSelected} of {MEALS_PER_WEEK} selected
+            · choose {mealRangeLabel(minMeals, maxMeals)} meals
           </span>
         </h2>
 
@@ -2381,7 +2432,7 @@ function MealGrid({
   const showError = fetcherError != null && !errorDismissed;
 
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
-  const maxMeals = quantityRanges.length > 0 ? Math.max(...quantityRanges.map(([, max]) => max)) : MEALS_PER_WEEK;
+  const { min: minMeals, max: maxMeals } = mealCountRange(quantityRanges);
   const isValidTotal = quantityRanges.length > 0
     ? quantityRanges.some(([min, max]) => totalItems >= min && totalItems <= max)
     : totalItems === MEALS_PER_WEEK;
@@ -2611,10 +2662,10 @@ function MealGrid({
           <div className="card rounded-b-none border-b-0 border-x-0 sm:border-x px-5 py-4 flex items-center justify-between gap-4 backdrop-blur-sm bg-white/95">
             <div className="flex items-center gap-3">
               <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-800" : "text-amber-700"}`}>
-                {totalItems} / {maxMeals} meals
+                {totalItems} of {maxMeals} meals
               </p>
               {!isValidTotal && (
-                <span className="text-xs text-stone-400">Pick {quantityRanges.length > 1 ? quantityRanges.map(([min]) => min).join(" or ") : maxMeals} to save</span>
+                <span className="text-xs text-stone-400">Pick {mealRangeLabel(minMeals, maxMeals)} to save</span>
               )}
               {savedOk && (
                 <span className="text-sm font-medium flex items-center gap-1 animate-fade-in" style={{ color: "#16a34a" }}>

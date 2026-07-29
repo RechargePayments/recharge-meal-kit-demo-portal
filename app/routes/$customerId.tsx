@@ -1721,7 +1721,7 @@ function Header({
                 </Link>
                 <div className="border-t border-stone-100 my-1" />
                 <Link
-                  to="/"
+                  to="/logout"
                   onClick={closeMenu}
                   className="flex items-center gap-2 px-4 py-2.5 text-sm text-stone-700 hover:bg-stone-50 transition-colors"
                 >

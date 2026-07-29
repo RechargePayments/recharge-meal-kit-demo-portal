@@ -270,7 +270,14 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ? chargesBundleCheck.filter((cb) => chargeBelongsToSubscription(cb, activeSubscription.purchaseItemId))
     : chargesBundleCheck.filter((cb) => cb.bundleSelections.length > 0);
 
-  const chargeTabs: ChargeTabInfo[] = chargesForActiveSubscription.map((cb) => ({
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const visibleCharges = chargesForActiveSubscription.filter((cb) => {
+    if (cb.charge.status !== "skipped") return true;
+    return new Date(cb.charge.scheduled_at) >= today;
+  });
+
+  const chargeTabs: ChargeTabInfo[] = visibleCharges.map((cb) => ({
     chargeId: cb.charge.id,
     scheduledAt: cb.charge.scheduled_at,
     totalPrice: cb.charge.total_price,
@@ -281,8 +288,8 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   // Phase 3: Load full Shopify data ONLY for the active/selected charge
   const activeEntry = selectedWeek
-    ? chargesForActiveSubscription.find((cb) => String(cb.charge.id) === selectedWeek) ?? chargesForActiveSubscription[0]
-    : chargesForActiveSubscription[0];
+    ? visibleCharges.find((cb) => String(cb.charge.id) === selectedWeek) ?? visibleCharges[0]
+    : visibleCharges[0];
 
   const activeCharge = activeEntry?.charge ?? null;
 

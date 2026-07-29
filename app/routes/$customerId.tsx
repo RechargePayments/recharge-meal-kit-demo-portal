@@ -2374,7 +2374,10 @@ function MealGrid({
   const showError = fetcherError != null && !errorDismissed;
 
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
-  const isValidTotal = totalItems === MEALS_PER_WEEK;
+  const maxMeals = quantityRanges.length > 0 ? Math.max(...quantityRanges.map(([, max]) => max)) : MEALS_PER_WEEK;
+  const isValidTotal = quantityRanges.length > 0
+    ? quantityRanges.some(([min, max]) => totalItems >= min && totalItems <= max)
+    : totalItems === MEALS_PER_WEEK;
 
   const hasChanges = items.some((item) => {
     const orig = savedQty[item.external_variant_id] ?? 0;
@@ -2570,13 +2573,13 @@ function MealGrid({
                       {item.quantity}
                     </span>
                     <button
-                      onClick={() => { if (totalItems < MEALS_PER_WEEK) adjustQty(index, 1); }}
-                      aria-disabled={totalItems >= MEALS_PER_WEEK}
-                      title={totalItems >= MEALS_PER_WEEK ? "You've picked all 5 meals — remove one to swap" : "Add meal"}
-                      className={`stepper-btn ${totalItems >= MEALS_PER_WEEK ? "cursor-not-allowed" : ""}`}
-                      style={totalItems >= MEALS_PER_WEEK ? { backgroundColor: "#e7e5e4", color: "#a8a29e" } : { backgroundColor: "#22c55e" }}
-                      onMouseEnter={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#16a34a"; }}
-                      onMouseLeave={(e) => { if (totalItems < MEALS_PER_WEEK) e.currentTarget.style.backgroundColor = "#22c55e"; }}
+                      onClick={() => { if (totalItems < maxMeals) adjustQty(index, 1); }}
+                      aria-disabled={totalItems >= maxMeals}
+                      title={totalItems >= maxMeals ? `You've picked all ${maxMeals} meals — remove one to swap` : "Add meal"}
+                      className={`stepper-btn ${totalItems >= maxMeals ? "cursor-not-allowed" : ""}`}
+                      style={totalItems >= maxMeals ? { backgroundColor: "#e7e5e4", color: "#a8a29e" } : { backgroundColor: "#22c55e" }}
+                      onMouseEnter={(e) => { if (totalItems < maxMeals) e.currentTarget.style.backgroundColor = "#16a34a"; }}
+                      onMouseLeave={(e) => { if (totalItems < maxMeals) e.currentTarget.style.backgroundColor = "#22c55e"; }}
                     >
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                         <path strokeLinecap="round" d="M12 6v12M6 12h12" />
@@ -2601,10 +2604,10 @@ function MealGrid({
           <div className="card rounded-b-none border-b-0 border-x-0 sm:border-x px-5 py-4 flex items-center justify-between gap-4 backdrop-blur-sm bg-white/95">
             <div className="flex items-center gap-3">
               <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-800" : "text-amber-700"}`}>
-                {totalItems} / {MEALS_PER_WEEK} meals
+                {totalItems} / {maxMeals} meals
               </p>
               {!isValidTotal && (
-                <span className="text-xs text-stone-400">Pick {MEALS_PER_WEEK} to save</span>
+                <span className="text-xs text-stone-400">Pick {quantityRanges.length > 1 ? quantityRanges.map(([min]) => min).join(" or ") : maxMeals} to save</span>
               )}
               {savedOk && (
                 <span className="text-sm font-medium flex items-center gap-1 animate-fade-in" style={{ color: "#16a34a" }}>

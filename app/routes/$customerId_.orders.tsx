@@ -78,7 +78,7 @@ function OrderCard({ charge }: { charge: Charge }) {
             <p className="font-display font-semibold text-stone-900">
               Delivered on {formatDate(deliveredOn)}
             </p>
-            <p className="text-xs text-stone-400 mt-0.5">
+            <p className="text-xs text-stone-600 mt-0.5">
               Order #{charge.id} &middot; {mealCount} {mealCount === 1 ? "item" : "items"}
             </p>
           </div>
@@ -87,7 +87,6 @@ function OrderCard({ charge }: { charge: Charge }) {
           <p className="font-display font-semibold text-stone-900">
             {formatCurrency(charge.total_price, currency)}
           </p>
-          <p className="text-[11px] uppercase tracking-wide text-stone-400 mt-0.5">Total</p>
         </div>
       </div>
 

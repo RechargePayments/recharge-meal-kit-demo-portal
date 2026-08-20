@@ -3010,6 +3010,7 @@ function MealGrid({
         maxMeals={maxMeals}
         chargeIsQueued={chargeIsQueued}
         locked={locked}
+        isSaving={isSaving}
         onAdjust={(delta) => { adjustQty(detailItem.index, delta); setDetailItem(d => d ? { ...d, item: { ...d.item, quantity: Math.max(0, d.item.quantity + delta) } } : null); }}
         onClose={() => setDetailItem(null)}
       />
@@ -3055,6 +3056,7 @@ function MealDetailModal({
   maxMeals,
   chargeIsQueued,
   locked,
+  isSaving,
   onAdjust,
   onClose,
 }: {
@@ -3064,6 +3066,7 @@ function MealDetailModal({
   maxMeals: number;
   chargeIsQueued: boolean;
   locked: boolean;
+  isSaving: boolean;
   onAdjust: (delta: number) => void;
   onClose: () => void;
 }) {

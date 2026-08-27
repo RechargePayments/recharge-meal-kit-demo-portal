@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remi
 import { json, redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData, useNavigation, useRevalidator, useSearchParams } from "@remix-run/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   activateSubscription,
   getCustomer,
@@ -865,6 +866,7 @@ export default function Dashboard() {
                 <OrderTotalCard
                   totalPrice={activeCharge.total_price}
                   mealsSelected={0}
+                  addonCount={0}
                   creditSummary={creditSummary}
                 />
               </aside>
@@ -891,7 +893,12 @@ export default function Dashboard() {
 function frequencyLabel(sub: Subscription | undefined): string | null {
   if (!sub?.charge_interval_frequency || !sub?.order_interval_unit) return null;
   const n = sub.charge_interval_frequency;
-  return `Every ${n} ${sub.order_interval_unit}${n > 1 ? "s" : ""}`;
+  const unit = sub.order_interval_unit;
+  if (n === 1) {
+    if (unit === "week") return "Delivered weekly";
+    if (unit === "month") return "Delivered monthly";
+  }
+  return `Delivered every ${n} ${unit}${n > 1 ? "s" : ""}`;
 }
 
 // ─── Week view (two-column: meals + add-on sidebar) ───────────────────────────
@@ -937,63 +944,94 @@ function WeekView({
 
   const initialCount = primary ? primary.items.reduce((sum, item) => sum + item.quantity, 0) : 0;
   const [mealsSelected, setMealsSelected] = useState(initialCount);
+  const [isPrefSaving, setIsPrefSaving] = useState(false);
 
   const quantityRanges = primary?.external_product_id
     ? (activeBundle.bundleProductRangesByProductId[primary.external_product_id] ?? [])
     : [];
   const { min: minMeals, max: maxMeals } = mealCountRange(quantityRanges);
 
-  return (
-    <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in ${isLoadingTab ? "opacity-50 pointer-events-none" : ""}`}>
-      <div className="lg:col-span-2 space-y-6">
-        <NextDeliveryCard
-          scheduledAt={charge.scheduled_at}
-          deliveryDateOffset={deliveryDateOffset}
-          mealsSelected={mealsSelected}
-          minMeals={minMeals}
-          maxMeals={maxMeals}
-          frequency={subscriptionFrequency}
-          skipped={isSkipped}
-          editHref={`/${customerId}/account`}
-        />
+  if (isLoadingTab) {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+        <div className="lg:col-span-2 space-y-6">
+          <div className="card p-5">
+            <div className="h-3 skeleton rounded w-32 mb-3" />
+            <div className="flex gap-2.5 overflow-hidden">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="shrink-0 min-w-[120px] h-[72px] skeleton rounded-2xl" />
+              ))}
+            </div>
+            <div className="border-t border-stone-100 mt-4 pt-4 flex items-center justify-between">
+              <div className="space-y-2">
+                <div className="h-2.5 skeleton rounded w-16" />
+                <div className="h-7 skeleton rounded w-36" />
+                <div className="h-2 skeleton rounded w-24" />
+              </div>
+              <div className="h-9 skeleton rounded-xl w-32" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="card overflow-hidden">
+                <div className="aspect-square skeleton" />
+                <div className="p-3 space-y-2">
+                  <div className="h-3 skeleton rounded w-3/4 mx-auto" />
+                  <div className="h-3 skeleton rounded w-1/2 mx-auto" />
+                  <div className="flex justify-center gap-2 pt-1">
+                    <div className="w-8 h-8 skeleton rounded-full" />
+                    <div className="w-5 h-5 skeleton rounded self-center" />
+                    <div className="w-8 h-8 skeleton rounded-full" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <aside className="space-y-4">
+          <div className="card p-5 space-y-3">
+            <div className="h-3 skeleton rounded w-20" />
+            <div className="h-16 skeleton rounded-lg" />
+            <div className="h-16 skeleton rounded-lg" />
+            <div className="h-16 skeleton rounded-lg" />
+          </div>
+          <div className="card p-5 space-y-3">
+            <div className="h-3 skeleton rounded w-24" />
+            <div className="h-8 skeleton rounded" />
+          </div>
+        </aside>
+      </div>
+    );
+  }
 
-        <WeekTabs
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+      <div className={`lg:col-span-2 space-y-6 ${charge.status === "queued" && !locked ? "pb-28" : ""}`}>
+        <WeekContextCard
           tabs={tabs}
           activeIndex={activeIndex}
-          deliveryDateOffset={deliveryDateOffset}
           onSelect={onSelectWeek}
+          deliveryDateOffset={deliveryDateOffset}
+          modificationWindowDays={modificationWindowDays}
+          scheduledAt={charge.scheduled_at}
+          frequency={subscriptionFrequency}
+          isSkipped={isSkipped}
+          locked={locked}
+          chargeId={charge.id}
+          purchaseItemId={primary?.purchase_item_id ?? purchaseItemId}
+          bundleVariantId={bundleVariantId}
         />
 
-        {isSkipped ? (
-          <SkippedBanner
-            chargeId={charge.id}
-            scheduledAt={charge.scheduled_at}
-            deliveryDateOffset={deliveryDateOffset}
-            purchaseItemId={purchaseItemId}
-            bundleVariantId={bundleVariantId}
-          />
-        ) : locked ? (
-          <LockedBanner
-            scheduledAt={charge.scheduled_at}
-            deliveryDateOffset={deliveryDateOffset}
-            modificationWindowDays={modificationWindowDays}
-          />
-        ) : charge.status === "queued" ? (
-          <SkipWeekButton
-            chargeId={charge.id}
-            scheduledAt={charge.scheduled_at}
-            purchaseItemId={primary?.purchase_item_id ?? purchaseItemId}
-            bundleVariantId={bundleVariantId}
-          />
-        ) : null}
-
-        <div>
+        <div className="card p-4 sm:p-5">
           <MealsHeader
             mealsSelected={mealsSelected}
             minMeals={minMeals}
             maxMeals={maxMeals}
             preferences={preferences}
             customerId={customerId}
+            scheduledAt={charge.scheduled_at}
+            deliveryDateOffset={deliveryDateOffset}
+            onSavingChange={setIsPrefSaving}
           />
 
           {primary && (
@@ -1009,6 +1047,7 @@ function WeekView({
               bundleVariantId={bundleVariantId}
               locked={locked}
               onCountChange={setMealsSelected}
+              isPrefSaving={isPrefSaving}
             />
           )}
         </div>
@@ -1027,6 +1066,7 @@ function WeekView({
         <OrderTotalCard
           totalPrice={charge.total_price}
           mealsSelected={mealsSelected}
+          addonCount={activeAddons.length}
           creditSummary={creditSummary}
         />
       </aside>
@@ -1093,11 +1133,11 @@ function NextDeliveryCard({
     <div className="card p-5 sm:p-6">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-wider text-stone-400">Next delivery</p>
+          <p className="text-xs font-semibold uppercase tracking-wider text-stone-500">Next delivery</p>
           <p className="font-display text-2xl sm:text-3xl font-bold text-stone-900 mt-1 leading-tight">
             {formatDate(deliveryDate)}
           </p>
-          {frequency && <p className="text-xs text-stone-400 mt-1">{frequency}</p>}
+          {frequency && <p className="text-xs text-stone-500 mt-1">{frequency}</p>}
         </div>
 
         <div className="flex items-center gap-3 flex-none">
@@ -1106,11 +1146,6 @@ function NextDeliveryCard({
           >
             {mealsSelected} of {maxMeals} meals
           </span>
-          {editHref && (
-            <Link to={editHref} className="text-sm font-medium text-stone-500 hover:text-brand-700 transition-colors">
-              Edit
-            </Link>
-          )}
         </div>
       </div>
 
@@ -1122,7 +1157,7 @@ function NextDeliveryCard({
             background: skipped
               ? "#d6d3d1"
               : complete
-                ? "linear-gradient(to right, #22c55e, #4ade80)"
+                ? "linear-gradient(to right, #6aab28, #88cf42)"
                 : "#fbbf24",
           }}
         />
@@ -1145,12 +1180,18 @@ function MealsHeader({
   maxMeals,
   preferences,
   customerId,
+  scheduledAt,
+  deliveryDateOffset,
+  onSavingChange,
 }: {
   mealsSelected: number;
   minMeals: number;
   maxMeals: number;
   preferences: CustomerPreference | null;
   customerId: string;
+  scheduledAt: string;
+  deliveryDateOffset: number;
+  onSavingChange?: (saving: boolean) => void;
 }) {
   const fetcher = useFetcher<typeof action>();
   const persisted = preferences?.exclude ?? [];
@@ -1163,6 +1204,11 @@ function MealsHeader({
       : null;
   const current = optimistic ?? persisted;
   const saving = fetcher.state !== "idle";
+
+  useEffect(() => {
+    onSavingChange?.(saving);
+  }, [saving, onSavingChange]);
+
   const justSaved =
     fetcher.state === "idle" &&
     fetcher.data != null &&
@@ -1203,122 +1249,328 @@ function MealsHeader({
   const extraOptions = current.filter((e) => !PREFERENCE_OPTIONS.some((o) => o.toLowerCase() === e.toLowerCase()));
   const editorOptions = [...PREFERENCE_OPTIONS, ...extraOptions];
 
+  const activeCount = current.length;
+
   return (
-    <div className="mb-4 space-y-3">
+    <div className="mb-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="font-display text-xl font-bold text-stone-900">
-          Your meals
-          <span className="ml-2 text-sm font-medium text-stone-400">
-            · choose {mealRangeLabel(minMeals, maxMeals)} meals
+          Your meals for {formatDate(addDaysToDate(scheduledAt, deliveryDateOffset))}
+          <span className="ml-2 text-sm font-medium text-stone-500">
+            · Choose {mealRangeLabel(minMeals, maxMeals)} meals
           </span>
         </h2>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {DIET_FILTERS.map((filter) => {
-            const active = filter.tags.some((t) => excludeIncludes(current, t));
-            return (
-              <button
-                key={filter.id}
-                type="button"
-                onClick={() => toggleQuick(filter)}
-                disabled={saving}
-                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150 disabled:opacity-60 ${
-                  active ? filter.activeTone : filter.tone
-                }`}
-              >
-                {active && (
-                  <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M16.704 5.29a1 1 0 010 1.42l-7.5 7.5a1 1 0 01-1.42 0l-3.5-3.5a1 1 0 111.42-1.42l2.79 2.79 6.79-6.79a1 1 0 011.42 0z" clipRule="evenodd" />
-                  </svg>
-                )}
-                {filter.label}
-              </button>
-            );
-          })}
-
-          <button
-            type="button"
-            onClick={() => (editing ? setEditing(false) : openEditor())}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150 ${
-              editing
-                ? "border-stone-300 bg-stone-100 text-stone-700"
-                : "border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:text-stone-800"
-            }`}
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527a1.125 1.125 0 01-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            {editing ? "Close" : "Preferences"}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={openEditor}
+          className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150 border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:text-stone-800"
+        >
+          {activeCount > 0 ? (
+            <>
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-none" />
+              Avoiding {current.join(" · ")}
+            </>
+          ) : (
+            "Dietary preferences"
+          )}
+        </button>
       </div>
 
       {editing && (
-        <div className="card p-4 ring-1 ring-stone-200 animate-slide-up">
-          <div className="flex items-center justify-between gap-3 mb-1">
-            <h3 className="font-display text-sm font-bold text-stone-900">Dietary preferences</h3>
-            {justSaved && !saving && (
-              <span className="inline-flex items-center gap-1 text-xs font-medium" style={{ color: "#16a34a" }}>
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setEditing(false)} />
+          <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 animate-scale-in">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+              <h3 className="font-display text-base font-bold text-stone-900">Ingredients I avoid</h3>
+              <button
+                type="button"
+                onClick={() => setEditing(false)}
+                className="p-1 rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
                 </svg>
-                Saved
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-stone-400 mb-3">
-            Ingredients you avoid. Saved to your profile and used to flag meals &amp; add-ons every week.
-          </p>
+              </button>
+            </div>
 
-          <div className="flex flex-wrap gap-2">
-            {editorOptions.map((tag) => {
-              const active = excludeIncludes(draft, tag);
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => toggleDraft(tag)}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-all duration-150 ${
-                    active
-                      ? "border-amber-300 bg-amber-50 text-amber-700 ring-1 ring-amber-200"
-                      : "border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-700"
-                  }`}
-                >
-                  {active && (
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M16.704 5.29a1 1 0 010 1.42l-7.5 7.5a1 1 0 01-1.42 0l-3.5-3.5a1 1 0 111.42-1.42l2.79 2.79 6.79-6.79a1 1 0 011.42 0z" clipRule="evenodd" />
-                    </svg>
-                  )}
-                  {tag}
-                </button>
-              );
-            })}
-          </div>
+            <div className="px-5 py-4">
+              <p className="text-sm text-stone-500 mb-4">
+                Select ingredients you'd like to avoid. Meals containing them won't show up in your menu. Saved to your account.
+              </p>
 
-          <div className="flex items-center gap-3 mt-4 pt-3 border-t border-stone-100">
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => {
-                persist(draft);
-                setEditing(false);
-              }}
-              className="btn-primary text-sm px-5 py-2"
-            >
-              {saving ? "Saving..." : "Save preferences"}
-            </button>
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => setEditing(false)}
-              className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
-            >
-              Cancel
-            </button>
+              <div className="flex flex-wrap gap-2">
+                {editorOptions.map((tag) => {
+                  const active = excludeIncludes(draft, tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleDraft(tag)}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium transition-all duration-150 ${
+                        active
+                          ? "border-amber-300 bg-amber-50 text-amber-700"
+                          : "border-stone-200 bg-stone-50 text-stone-500 hover:border-stone-300 hover:text-stone-700 hover:bg-white"
+                      }`}
+                    >
+                      {active ? (
+                        <svg className="w-3.5 h-3.5 text-amber-500 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
+                        </svg>
+                      ) : (
+                        <svg className="w-3.5 h-3.5 text-stone-300 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                        </svg>
+                      )}
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-stone-100">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => setEditing(false)}
+                className="px-3 py-2 text-sm font-medium text-stone-500 hover:text-stone-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => { persist(draft); setEditing(false); }}
+                className="btn-primary text-sm px-5 py-2"
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Unified week context card (tabs + date hero + status + skip action) ────────
+
+function WeekContextCard({
+  tabs,
+  activeIndex,
+  onSelect,
+  deliveryDateOffset,
+  modificationWindowDays,
+  scheduledAt,
+  frequency,
+  isSkipped,
+  locked,
+  chargeId,
+  purchaseItemId,
+  bundleVariantId,
+}: {
+  tabs: ChargeTabInfo[];
+  activeIndex: number;
+  onSelect: (i: number) => void;
+  deliveryDateOffset: number;
+  modificationWindowDays: number;
+  scheduledAt: string;
+  frequency: string | null;
+  isSkipped: boolean;
+  locked: boolean;
+  chargeId: number;
+  purchaseItemId: number | null;
+  bundleVariantId: string;
+}) {
+  const deliveryDate = addDaysToDate(scheduledAt, deliveryDateOffset);
+  const deliveryStr = formatDate(deliveryDate);
+  const cutoff = new Date(deliveryDate + "T00:00:00Z");
+  cutoff.setUTCDate(cutoff.getUTCDate() - modificationWindowDays);
+  const cutoffStr = cutoff.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const check = () => setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+    check();
+    el.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check);
+    return () => { el.removeEventListener("scroll", check); window.removeEventListener("resize", check); };
+  }, [tabs]);
+
+  // Scroll the active tab into view whenever activeIndex changes.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const btn = el.querySelectorAll("button[data-tab]")[activeIndex] as HTMLElement | undefined;
+    btn?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [activeIndex]);
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-xs font-semibold uppercase tracking-wider text-stone-500">Upcoming deliveries</p>
+        {frequency && <span className="text-xs text-stone-500">{frequency}</span>}
+      </div>
+
+      <div className="relative -mx-5">
+        {canScrollRight && (
+          <div className="absolute right-0 top-0 bottom-1 w-16 bg-gradient-to-l from-white to-transparent z-10 pointer-events-none rounded-r-2xl" />
+        )}
+        <div className="absolute left-0 top-0 bottom-1 w-4 bg-gradient-to-r from-white to-transparent z-10 pointer-events-none rounded-l-2xl" />
+      <div
+        ref={scrollRef}
+        className="flex gap-2.5 overflow-x-auto scrollbar-hide px-5 pb-1"
+        onTouchStart={(e) => { touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }}
+        onTouchEnd={(e) => {
+          const start = touchStartRef.current;
+          if (!start) return;
+          const dx = e.changedTouches[0].clientX - start.x;
+          const dy = e.changedTouches[0].clientY - start.y;
+          if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 48) {
+            if (dx < 0) onSelect(Math.min(tabs.length - 1, activeIndex + 1));
+            else onSelect(Math.max(0, activeIndex - 1));
+          }
+          touchStartRef.current = null;
+        }}
+      >
+        {tabs.map((tab, i) => {
+          const isActive = i === activeIndex;
+          const tabIsSkipped = tab.status === "skipped";
+          const tabDeliveryDate = addDaysToDate(tab.scheduledAt, deliveryDateOffset);
+          const inactiveClass = tabIsSkipped
+            ? "bg-amber-50/60 text-amber-700 border-amber-200 hover:border-amber-400 hover:shadow-warm-sm"
+            : "bg-white text-stone-600 border-stone-200 hover:border-stone-400 hover:shadow-warm-sm";
+          const activeStyle = isActive
+            ? tabIsSkipped
+              ? { backgroundColor: "#fef9ec", borderColor: "#d97706", boxShadow: "0 2px 8px rgba(28,25,23,0.08)" }
+              : { backgroundColor: "#edf2e6", borderColor: "rgba(80,133,25,0.6)", boxShadow: "0 2px 8px rgba(28,25,23,0.08)" }
+            : undefined;
+          return (
+            <button
+              key={tab.chargeId}
+              data-tab={i}
+              onClick={() => onSelect(i)}
+              className={`shrink-0 min-w-[120px] rounded-2xl px-3 py-2.5 text-left transition-all duration-200 border ${isActive ? "" : inactiveClass}`}
+              style={activeStyle}
+            >
+              <p className="flex items-center gap-1 text-[11px] font-semibold leading-tight">
+                {tab.locked && (
+                  <svg className="w-3 h-3 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                )}
+                <span className={`truncate ${tabIsSkipped ? "line-through opacity-70" : ""}`}>
+                  {formatWeekLabel(tabDeliveryDate)}
+                </span>
+              </p>
+              <p className="mt-1 text-base font-bold tabular-nums text-stone-800">
+                {formatCurrency(tab.totalPrice)}
+              </p>
+              {tabIsSkipped && (
+                <span className={`mt-1 inline-flex items-center text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full ${isActive ? "bg-amber-200 text-amber-900" : "bg-amber-100 text-amber-800"}`}>
+                  Skipped
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      </div>
+
+      {tabs.length > 1 && tabs.length <= 8 && (
+        <div className="flex md:hidden items-center justify-center gap-2 mt-3">
+          {tabs.map((_, i) => (
+            <button
+              key={i}
+              onClick={() => onSelect(i)}
+              aria-label={`Go to delivery ${i + 1}`}
+              className={`rounded-full transition-all duration-200 ${
+                i === activeIndex
+                  ? "w-5 h-2 bg-stone-600"
+                  : "w-2 h-2 bg-stone-300 hover:bg-stone-500"
+              }`}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="border-t border-stone-100 mt-4 pt-4 flex items-center justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">Delivering</p>
+          <p className={`font-display text-2xl sm:text-3xl font-bold leading-tight ${isSkipped ? "text-stone-400 line-through" : "text-stone-900"}`}>{deliveryStr}</p>
+          {locked ? (
+            <p className="text-xs font-medium text-amber-700 mt-1">Editing closed · last day was {cutoffStr}</p>
+          ) : !isSkipped ? (
+            <p className="text-xs text-stone-500 mt-1">Last day to make changes: {cutoffStr}</p>
+          ) : null}
+        </div>
+
+        {locked ? (
+          <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 shrink-0">
+            <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <span className="text-xs font-semibold text-amber-800">Locked</span>
+          </div>
+        ) : !isSkipped ? (
+          <SkipWeekButton chargeId={chargeId} scheduledAt={scheduledAt} purchaseItemId={purchaseItemId} bundleVariantId={bundleVariantId} />
+        ) : null}
+      </div>
+
+      {isSkipped && (
+        <div className="mt-3 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex items-start gap-2.5 flex-1">
+            <svg className="w-4 h-4 text-amber-600 flex-none mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-sm text-amber-800">
+              <span className="font-semibold">This week is skipped</span> — your delivery won't be sent. Any add-ons have been removed and will need to be re-added if you unskip.
+            </p>
+          </div>
+          <WeekContextUnskipButton chargeId={chargeId} purchaseItemId={purchaseItemId} bundleVariantId={bundleVariantId} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WeekContextUnskipButton({
+  chargeId,
+  purchaseItemId,
+  bundleVariantId,
+}: {
+  chargeId: number;
+  purchaseItemId: number | null;
+  bundleVariantId: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const isUnskipping = fetcher.state !== "idle";
+  const error =
+    fetcher.state === "idle" && fetcher.data != null && "error" in fetcher.data
+      ? (fetcher.data as { error: string }).error
+      : null;
+  return (
+    <div className="shrink-0">
+      <fetcher.Form method="post">
+        <input type="hidden" name="intent" value="unskip" />
+        <input type="hidden" name="bundleVariantId" value={bundleVariantId} />
+        <input type="hidden" name="chargeId" value={String(chargeId)} />
+        {purchaseItemId != null && <input type="hidden" name="purchaseItemId" value={String(purchaseItemId)} />}
+        <button
+          type="submit"
+          disabled={isUnskipping}
+          className="inline-flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-4 py-2.5 text-sm font-semibold text-stone-500 transition-all duration-150 hover:bg-stone-50 hover:text-stone-700 hover:border-stone-300 active:scale-[0.99] disabled:opacity-60 shadow-warm-sm"
+        >
+          {isUnskipping ? "Unskipping..." : "Unskip this week"}
+        </button>
+      </fetcher.Form>
+      {error && <p className="mt-1 text-xs font-medium text-red-700">{error}</p>}
     </div>
   );
 }
@@ -1354,7 +1606,7 @@ function SkipWeekButton({
         <button
           type="submit"
           disabled={isSkipping}
-          className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 transition-all duration-150 hover:bg-amber-100 hover:border-amber-400 active:scale-[0.99] disabled:opacity-60"
+          className="inline-flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-4 py-2.5 text-sm font-semibold text-stone-500 transition-all duration-150 hover:bg-stone-50 hover:text-stone-700 hover:border-stone-300 active:scale-[0.99] disabled:opacity-60 shadow-warm-sm"
         >
           {isSkipping ? (
             <>
@@ -1384,26 +1636,39 @@ function SkipWeekButton({
 function OrderTotalCard({
   totalPrice,
   mealsSelected,
+  addonCount,
   creditSummary,
 }: {
   totalPrice: string;
   mealsSelected: number;
+  addonCount: number;
   creditSummary: CreditSummary | null;
 }) {
   const hasCredits = creditSummary && parseFloat(creditSummary.total_available_balance) > 0;
 
   return (
     <div className="card p-5 lg:sticky lg:top-6">
-      <p className="text-xs font-semibold uppercase tracking-wider text-stone-400">Order total</p>
-      <div className="flex items-end justify-between gap-3 mt-1.5">
-        <p className="text-xs text-stone-400 leading-snug max-w-[55%]">
-          {mealsSelected} meal{mealsSelected !== 1 ? "s" : ""} · updates as you customize
-        </p>
-        <p className="font-display text-2xl font-bold text-stone-900 tabular-nums">{formatCurrency(totalPrice)}</p>
+      <p className="text-xs font-semibold uppercase tracking-wider text-stone-500">Order total</p>
+      <div className="mt-2 space-y-1">
+        <div className="flex items-center gap-1.5 text-xs text-stone-500">
+          <svg className="w-3.5 h-3.5 text-brand-600 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+          </svg>
+          {mealsSelected} meal{mealsSelected !== 1 ? "s" : ""}
+        </div>
+        {addonCount > 0 && (
+          <div className="flex items-center gap-1.5 text-xs text-stone-500">
+            <svg className="w-3.5 h-3.5 text-brand-600 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+            </svg>
+            {addonCount} add-on{addonCount !== 1 ? "s" : ""}
+          </div>
+        )}
       </div>
+      <p className="font-display text-2xl font-bold text-stone-900 tabular-nums mt-3">{formatCurrency(totalPrice)}</p>
 
       {hasCredits && (
-        <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+        <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-xs font-medium text-brand-700">
           <svg className="w-4 h-4 flex-none" viewBox="0 0 20 20" fill="currentColor">
             <path d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.736 6.979C9.208 6.193 9.696 6 10 6c.304 0 .792.193 1.264.979a1 1 0 001.715-1.029C12.279 4.784 11.232 4 10 4s-2.279.784-2.979 1.95c-.285.475-.507 1-.67 1.55H6a1 1 0 000 2h.013a9.358 9.358 0 000 1H6a1 1 0 100 2h.351c.163.55.385 1.075.67 1.55C7.721 15.216 8.768 16 10 16s2.279-.784 2.979-1.95a1 1 0 10-1.715-1.029c-.472.786-.96.979-1.264.979-.304 0-.792-.193-1.264-.979a5.38 5.38 0 01-.491-.921H10a1 1 0 100-2H8.003a7.364 7.364 0 010-1H10a1 1 0 100-2H8.245c.155-.347.335-.665.491-.921z" />
           </svg>
@@ -1447,15 +1712,8 @@ function AddOnsSidebar({
   return (
     <div className="card overflow-hidden">
       <div className="px-5 pt-5 pb-3">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full flex items-center justify-center flex-none" style={{ backgroundColor: "rgba(244, 162, 97, 0.18)" }}>
-            <svg className="w-3.5 h-3.5" style={{ color: "#E76F51" }} viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" />
-            </svg>
-          </div>
-          <h3 className="font-display text-base font-bold text-stone-900">Add something extra</h3>
-        </div>
-        <p className="text-xs text-stone-400 mt-1">Add-ons are separate from your meal plan.</p>
+        <h3 className="font-display text-base font-bold text-stone-900">Add something extra</h3>
+        <p className="text-xs text-stone-500 mt-1">Add-ons are separate from your meal plan.</p>
       </div>
 
       <div className="divide-y divide-stone-100">
@@ -1552,7 +1810,7 @@ function AddonSidebarRow({
           {product.title}
         </p>
         {excluded && allergens ? (
-          <p className="text-xs font-medium mt-0.5" style={{ color: "#E76F51" }}>{allergens}</p>
+          <p className="text-xs font-medium mt-0.5" style={{ color: "#E87B30" }}>{allergens}</p>
         ) : (
           <p className="text-sm font-bold text-stone-900 mt-0.5">{formatCurrency(product.price)}</p>
         )}
@@ -1565,7 +1823,7 @@ function AddonSidebarRow({
             Avoid
           </span>
         ) : wasAdded ? (
-          <span className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold" style={{ color: "#16a34a", backgroundColor: "#dcfce7" }}>
+          <span className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold" style={{ color: "#508519", backgroundColor: "#e5f6d0" }}>
             <svg className="w-3.5 h-3.5 animate-check-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
@@ -1577,9 +1835,9 @@ function AddonSidebarRow({
             onClick={handleAdd}
             disabled={isAdding}
             className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-bold text-white transition-colors disabled:opacity-50"
-            style={{ backgroundColor: "#16a34a" }}
-            onMouseEnter={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#15803d"; }}
-            onMouseLeave={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#16a34a"; }}
+            style={{ backgroundColor: "#508519" }}
+            onMouseEnter={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#3d6813"; }}
+            onMouseLeave={(e) => { if (!isAdding) e.currentTarget.style.backgroundColor = "#508519"; }}
           >
             {isAdding ? (
               <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -1604,21 +1862,21 @@ function AddonSidebarRow({
 function LoadingGrid() {
   return (
     <div className="space-y-5">
-      <div className="card p-5 animate-pulse">
-        <div className="h-4 bg-stone-200 rounded w-48 mb-3" />
-        <div className="h-2.5 bg-stone-100 rounded-full" />
+      <div className="card p-5">
+        <div className="h-4 skeleton rounded w-48 mb-3" />
+        <div className="h-2.5 skeleton rounded-full" />
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         {Array.from({ length: 8 }).map((_, i) => (
-          <div key={i} className="card overflow-hidden animate-pulse">
-            <div className="aspect-square bg-stone-100" />
+          <div key={i} className="card overflow-hidden">
+            <div className="aspect-square skeleton" />
             <div className="p-3 space-y-2">
-              <div className="h-3 bg-stone-200 rounded w-3/4 mx-auto" />
-              <div className="h-3 bg-stone-100 rounded w-1/2 mx-auto" />
-              <div className="flex justify-center gap-3 pt-1">
-                <div className="w-9 h-9 rounded-full bg-stone-100" />
-                <div className="w-5 h-5 rounded bg-stone-100" />
-                <div className="w-9 h-9 rounded-full bg-stone-100" />
+              <div className="h-3 skeleton rounded w-3/4 mx-auto" />
+              <div className="h-3 skeleton rounded w-1/2 mx-auto" />
+              <div className="flex justify-center gap-2 pt-1">
+                <div className="w-8 h-8 skeleton rounded-full" />
+                <div className="w-5 h-5 skeleton rounded" />
+                <div className="w-8 h-8 skeleton rounded-full" />
               </div>
             </div>
           </div>
@@ -1731,7 +1989,10 @@ function Header({
               />
             </Link>
             {refreshing && (
-              <span className="text-xs text-stone-400 animate-pulse-soft ml-2">Syncing...</span>
+              <svg className="w-4 h-4 text-stone-400 animate-spin ml-2" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
             )}
           </div>
 
@@ -1742,13 +2003,13 @@ function Header({
               className="flex items-center gap-3 rounded-lg px-2 py-1 -mx-2 -my-1 hover:bg-stone-50 transition-colors"
             >
               <p className="text-sm text-stone-500 hidden sm:block">{customer.email}</p>
-              <div className="w-10 h-10 rounded-full bg-brand-100 border-2 border-brand-200 flex items-center justify-center shrink-0">
+              <div className="w-10 h-10 rounded-full bg-stone-100 border-2 border-stone-200 flex items-center justify-center shrink-0">
                 {customer.first_name?.[0] ? (
-                  <span className="text-sm font-bold text-brand-700">
+                  <span className="text-sm font-bold text-stone-600">
                     {customer.first_name[0]}{customer.last_name?.[0]}
                   </span>
                 ) : (
-                  <svg className="w-5 h-5 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <svg className="w-5 h-5 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
                   </svg>
                 )}
@@ -1775,7 +2036,7 @@ function Header({
                   <svg className="w-4 h-4 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
                   </svg>
-                  Previous Orders
+                  Previous orders
                 </Link>
                 <div className="border-t border-stone-100 my-1" />
                 <Link
@@ -1786,7 +2047,7 @@ function Header({
                   <svg className="w-4 h-4 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
                   </svg>
-                  Sign Out
+                  Sign out
                 </Link>
               </div>
             )}
@@ -1795,41 +2056,39 @@ function Header({
 
         {displayAddress && (
           <div className="border-t border-stone-100">
-            <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <svg className="w-4 h-4 text-brand-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
-                </svg>
-                <span className="text-sm text-stone-600 truncate">
-                  <span className="font-medium text-stone-700">Delivering to</span>{" "}
-                  {formatAddress(displayAddress)}
-                </span>
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center gap-3">
+              <svg className="w-4 h-4 text-brand-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+              </svg>
+              <span className="text-sm text-stone-600 truncate min-w-0">
+                <span className="font-medium text-stone-700">Delivering to</span>{" "}
+                {formatAddress(displayAddress)}
+              </span>
 
-                {addresses.length > 1 && (
-                  <select
-                    className="ml-2 text-xs border border-stone-200 rounded-md px-2 py-1 bg-white text-stone-600 focus:outline-none focus:ring-1 focus:ring-brand-300"
-                    value={displayAddress.id}
-                    onChange={(e) => setSelectedAddressId(Number(e.target.value))}
-                  >
-                    {addresses.map((addr) => (
-                      <option key={addr.id} value={addr.id}>
-                        {addr.address1}, {addr.city}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
+              {addresses.length > 1 && (
+                <select
+                  className="text-xs border border-stone-200 rounded-md px-2 py-1 bg-white text-stone-600 focus:outline-none focus:ring-1 focus:ring-brand-300 shrink-0"
+                  value={displayAddress.id}
+                  onChange={(e) => setSelectedAddressId(Number(e.target.value))}
+                >
+                  {addresses.map((addr) => (
+                    <option key={addr.id} value={addr.id}>
+                      {addr.address1}, {addr.city}
+                    </option>
+                  ))}
+                </select>
+              )}
 
               <button
                 type="button"
                 onClick={() => setEditingAddress(displayAddress)}
-                className="shrink-0 p-1.5 rounded-md text-stone-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
-                title="Edit address"
+                className="shrink-0 flex items-center gap-1 text-sm font-medium text-stone-600 hover:text-brand-600 transition-colors"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487z" />
                 </svg>
+                Edit
               </button>
             </div>
           </div>
@@ -1877,8 +2136,8 @@ function AddressEditModal({ address, onClose }: { address: Address; onClose: () 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto animate-scale-in">
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100">
           <h2 className="font-display font-semibold text-lg text-stone-900">Edit shipping address</h2>
           <button
@@ -2042,7 +2301,7 @@ function SkippedBanner({
           <button
             type="submit"
             disabled={isUnskipping}
-            className="w-full sm:w-auto px-6 py-3 text-base font-bold text-white rounded-xl uppercase tracking-wide shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full sm:w-auto px-6 py-3 text-base font-bold text-white rounded-lg uppercase tracking-wide shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98]"
             style={{ backgroundColor: "#b45309" }}
             onMouseEnter={(e) => { if (!isUnskipping) e.currentTarget.style.backgroundColor = "#92400e"; }}
             onMouseLeave={(e) => { if (!isUnskipping) e.currentTarget.style.backgroundColor = "#b45309"; }}
@@ -2056,7 +2315,7 @@ function SkippedBanner({
                 Unskipping...
               </span>
             ) : (
-              "Unskip Week"
+              "Unskip this week"
             )}
           </button>
         </fetcher.Form>
@@ -2178,7 +2437,7 @@ function SubscriptionTabs({
             <button
               key={subscription.purchaseItemId}
               onClick={() => onSelect(subscription.purchaseItemId)}
-              className={`flex-none rounded-xl px-4 py-2 text-sm font-medium border transition-colors ${
+              className={`flex-none rounded-lg px-4 py-2 text-sm font-medium border transition-colors ${
                 isActive
                   ? "bg-brand-600 text-white border-brand-600"
                   : "bg-white text-stone-600 border-stone-200 hover:border-brand-300 hover:text-brand-700"
@@ -2219,18 +2478,18 @@ function WeekTabs({
 }) {
   return (
     <div>
-      <p className="text-xs font-semibold uppercase tracking-wider text-stone-400 mb-2">Upcoming deliveries</p>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+      <p className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2">Upcoming deliveries</p>
+      <div className="flex gap-2.5 overflow-x-auto scrollbar-hide -mx-5 px-5 pb-1">
         {tabs.map((tab, i) => {
           const isActive = i === activeIndex;
           const isSkipped = tab.status === "skipped";
           const deliveryDate = addDaysToDate(tab.scheduledAt, deliveryDateOffset);
           const activeBg = isSkipped
             ? { backgroundColor: "#b45309", borderColor: "#b45309", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" }
-            : { backgroundColor: "#16a34a", borderColor: "#16a34a", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" };
+            : { backgroundColor: "#508519", borderColor: "#508519", boxShadow: "0 4px 12px rgba(28, 25, 23, 0.07)" };
           const inactiveClass = isSkipped
             ? "bg-amber-50 text-amber-800 border-amber-200 hover:border-amber-400"
-            : "bg-white text-stone-600 border-stone-200 hover:border-green-300 hover:text-green-700";
+            : "bg-white text-stone-600 border-stone-200 hover:border-brand-300 hover:text-brand-700";
           return (
             <button
               key={tab.chargeId}
@@ -2247,7 +2506,7 @@ function WeekTabs({
                   </svg>
                 )}
                 <span className={`truncate ${isSkipped ? "line-through opacity-80" : ""}`}>
-                  {formatWeekLabel(deliveryDate)} · charge {formatWeekLabel(tab.scheduledAt)}
+                  {formatWeekLabel(deliveryDate)}
                 </span>
               </p>
               <p className={`mt-1 text-base font-bold tabular-nums ${isActive ? "text-white" : "text-stone-800"}`}>
@@ -2282,6 +2541,7 @@ type EditableItem = {
   variantTitle: string;
   imageUrl: string | null;
   tags: string[];
+  description: string | null;
 };
 
 function matchesTags(itemTags: string[], prefTags: string[]): boolean {
@@ -2356,6 +2616,7 @@ function buildEditableItems(
           variantTitle: variant.title,
           imageUrl: product.image_url ?? null,
           tags: product.tags ?? [],
+          description: product.description ?? null,
         });
       }
     }
@@ -2373,6 +2634,7 @@ function buildEditableItems(
         variantTitle: `Variant #${item.external_variant_id.split("/").pop()}`,
         imageUrl: null,
         tags: [],
+        description: null,
       });
     }
   }
@@ -2393,6 +2655,7 @@ function MealGrid({
   bundleVariantId,
   locked = false,
   onCountChange,
+  isPrefSaving = false,
 }: {
   charge: Charge;
   bundleSelection: BundleSelection;
@@ -2404,6 +2667,7 @@ function MealGrid({
   bundleVariantId: string;
   locked?: boolean;
   onCountChange?: (count: number) => void;
+  isPrefSaving?: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
   const eligibleSet = new Set(eligibleCollectionIds);
@@ -2413,6 +2677,7 @@ function MealGrid({
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
     () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
   );
+  const [detailItem, setDetailItem] = useState<{ item: EditableItem; index: number } | null>(null);
   const [errorDismissed, setErrorDismissed] = useState(false);
   const submittedQtyRef = useRef<Record<string, number>>({});
 
@@ -2535,35 +2800,51 @@ function MealGrid({
             The menu for this delivery date hasn&rsquo;t been published yet. Check back later, or contact support if you need help.
           </p>
         </div>
-      ) : (
+      ) : isPrefSaving ? (
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className="card overflow-hidden flex flex-col">
+            <div className="aspect-square skeleton" />
+            <div className="p-3 space-y-2 flex-1 flex flex-col justify-between">
+              <div className="space-y-1.5">
+                <div className="h-3 skeleton rounded w-3/4 mx-auto" />
+                <div className="h-3 skeleton rounded w-1/2 mx-auto" />
+              </div>
+              <div className="flex items-center justify-center gap-2 pt-1">
+                <div className="w-8 h-8 skeleton rounded-full" />
+                <div className="w-5 h-5 skeleton rounded" />
+                <div className="w-8 h-8 skeleton rounded-full" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      ) : (
+      <div className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 transition-opacity duration-300 ${isSaving ? "opacity-50 pointer-events-none" : ""}`}>
         {items.map((item, index) => {
           const isSelected = item.quantity > 0;
           const isPrefExclude = Boolean(preferences && matchesTags(item.tags, preferences.exclude));
-          const allergens = preferences ? allergenLabel(item.tags, preferences.exclude) : null;
+
+          if (isPrefExclude) return null;
 
           return (
             <div
               key={item.external_variant_id}
-              className={`card overflow-hidden transition-all duration-200 ${
-                isSelected
-                  ? "ring-2 ring-green-500"
-                  : isPrefExclude
-                    ? "opacity-80"
-                    : "hover:-translate-y-0.5"
+              className={`card transition-all duration-200 flex flex-col ${
+                isSelected ? "" : "hover:-translate-y-0.5"
               }`}
-              style={{
-                animationDelay: `${Math.min(index, 8) * 0.03}s`,
-                ...(isSelected ? { boxShadow: "0 0 0 3px rgba(34, 197, 94, 0.2)" } : {}),
-              }}
+              style={{ animationDelay: `${Math.min(index, 8) * 0.03}s` }}
             >
-              {/* Image area */}
-              <div className="relative aspect-square bg-stone-50 overflow-hidden">
+              {/* Image area — clickable to open detail modal */}
+              <div
+                className="relative aspect-square bg-stone-50 overflow-hidden rounded-t-3xl cursor-pointer group"
+                onClick={() => setDetailItem({ item, index })}
+              >
                 {item.imageUrl ? (
                   <img
                     src={item.imageUrl}
                     alt={item.productTitle}
-                    className={`w-full h-full object-cover transition-all duration-300 ${
+                    className={`w-full h-full object-cover transition-all duration-300 group-hover:scale-105 ${
                       isPrefExclude ? "grayscale opacity-70" : isSelected ? "" : "saturate-[0.85]"
                     }`}
                   />
@@ -2577,76 +2858,60 @@ function MealGrid({
 
                 {/* Selected overlay */}
                 {isSelected && (
-                  <div className="absolute top-2 right-2 w-6 h-6 rounded-full flex items-center justify-center animate-check-pop" style={{ backgroundColor: "#22c55e", boxShadow: "0 1px 3px rgba(28,25,23,0.06)" }}>
+                  <div className="absolute top-2 right-2 w-6 h-6 rounded-full flex items-center justify-center animate-check-pop" style={{ backgroundColor: "#508519", boxShadow: "0 1px 3px rgba(28,25,23,0.06)" }}>
                     <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                     </svg>
                   </div>
                 )}
 
-                {/* Preference badge */}
-                {isPrefExclude && (
-                  <div className="absolute top-2 left-2">
-                    <span className="badge text-white text-[10px] shadow-warm-sm" style={{ backgroundColor: "#E76F51" }}>Avoid</span>
-                  </div>
-                )}
-
-                {/* Allergen note pill */}
-                {isPrefExclude && allergens && (
-                  <div className="absolute inset-x-0 bottom-2 flex justify-center px-2">
-                    <span className="inline-flex items-center rounded-full bg-stone-900/80 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-sm">
-                      {allergens}
-                    </span>
-                  </div>
-                )}
               </div>
 
               {/* Card body */}
-              <div className="p-3 text-center">
-                <h4 className={`text-sm font-semibold leading-tight line-clamp-2 mb-0.5 ${isPrefExclude ? "text-stone-400 line-through" : "text-stone-800"}`}>
-                  {item.productTitle}
-                </h4>
-                {item.variantTitle && item.variantTitle !== "Default Title" && (
-                  <p className="text-xs text-stone-400 line-clamp-1">{item.variantTitle}</p>
-                )}
+              <div className="p-3 text-center flex flex-col flex-1">
+                <div className="flex-1">
+                  <h4 className="text-sm font-semibold leading-tight line-clamp-2 mb-0.5 text-stone-800">
+                    {item.productTitle}
+                  </h4>
+                  {item.variantTitle && item.variantTitle !== "Default Title" && (
+                    <p className="text-xs text-stone-500 line-clamp-1">{item.variantTitle}</p>
+                  )}
+                </div>
 
                 {/* Stepper / quantity display */}
                 {chargeIsQueued && !locked ? (
-                  <div className="flex items-center justify-center gap-3 mt-3">
-                    <button
-                      onClick={() => adjustQty(index, -1)}
-                      disabled={item.quantity <= 0}
-                      className="stepper-btn disabled:bg-stone-200"
-                      style={item.quantity > 0 ? { backgroundColor: "#ef4444" } : undefined}
-                      onMouseEnter={(e) => { if (item.quantity > 0) e.currentTarget.style.backgroundColor = "#dc2626"; }}
-                      onMouseLeave={(e) => { if (item.quantity > 0) e.currentTarget.style.backgroundColor = "#ef4444"; }}
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" d="M20 12H4" />
-                      </svg>
-                    </button>
+                  <div className="flex items-center justify-center gap-2 mt-3">
+                    <StepperTip tip={item.quantity <= 0 ? "Not in your box yet" : undefined}>
+                      <button
+                        onClick={() => adjustQty(index, -1)}
+                        disabled={item.quantity <= 0 || isSaving}
+                        className="stepper-btn"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" d="M20 12H4" />
+                        </svg>
+                      </button>
+                    </StepperTip>
                     <span className={`text-base font-bold tabular-nums min-w-[20px] ${
                       isSelected ? "text-stone-900" : "text-stone-300"
                     }`}>
                       {item.quantity}
                     </span>
-                    <button
-                      onClick={() => { if (totalItems < maxMeals) adjustQty(index, 1); }}
-                      aria-disabled={totalItems >= maxMeals}
-                      title={totalItems >= maxMeals ? `You've picked all ${maxMeals} meals — remove one to swap` : "Add meal"}
-                      className={`stepper-btn ${totalItems >= maxMeals ? "cursor-not-allowed" : ""}`}
-                      style={totalItems >= maxMeals ? { backgroundColor: "#e7e5e4", color: "#a8a29e" } : { backgroundColor: "#22c55e" }}
-                      onMouseEnter={(e) => { if (totalItems < maxMeals) e.currentTarget.style.backgroundColor = "#16a34a"; }}
-                      onMouseLeave={(e) => { if (totalItems < maxMeals) e.currentTarget.style.backgroundColor = "#22c55e"; }}
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" d="M12 6v12M6 12h12" />
-                      </svg>
-                    </button>
+                    <StepperTip tip={totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
+                      <button
+                        onClick={() => { if (totalItems < maxMeals) adjustQty(index, 1); }}
+                        disabled={totalItems >= maxMeals || isSaving}
+                        className="stepper-btn"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" d="M12 6v12M6 12h12" />
+                        </svg>
+                      </button>
+                    </StepperTip>
                   </div>
                 ) : (
                   <p className="text-sm font-semibold text-stone-400 mt-3">
-                    {item.quantity > 0 ? `x${item.quantity}` : "—"}
+                    {item.quantity > 0 ? `×${item.quantity}` : "—"}
                   </p>
                 )}
               </div>
@@ -2656,19 +2921,55 @@ function MealGrid({
       </div>
       )}
 
-      {/* Sticky footer */}
-      {chargeIsQueued && !locked && (
-        <div className="sticky bottom-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
-          <div className="card rounded-b-none border-b-0 border-x-0 sm:border-x px-5 py-4 flex items-center justify-between gap-4 backdrop-blur-sm bg-white/95">
+      {/* Fixed footer — mirrors the page grid so the bar aligns with this column */}
+      {chargeIsQueued && !locked && !(items.length === 0 && !hasPresetForWeek) && (
+        <div key={charge.id} className="fixed bottom-4 left-0 right-0 z-20 pointer-events-none" style={{ animation: "footerIn 0.45s cubic-bezier(0.34,1.56,0.64,1) forwards" }}>
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pointer-events-none">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 pointer-events-none">
+              <div className="lg:col-span-2 pointer-events-auto">
+          <div className="card overflow-hidden backdrop-blur-sm bg-white/95 mx-10" style={{ boxShadow: "0 8px 32px rgba(28,25,23,0.18), 0 2px 8px rgba(28,25,23,0.10)" }}>
+          {/* Progress bar inside the footer card */}
+          <div className="h-2 w-full bg-stone-100 flex overflow-hidden">
+            {/* Required zone: fills to minMeals */}
+            <div
+              className="relative h-full flex-none"
+              style={{ width: `${maxMeals > 0 ? (minMeals / maxMeals) * 100 : 100}%` }}
+            >
+              <div
+                className="h-full transition-all duration-300"
+                style={{
+                  width: `${minMeals > 0 ? Math.min(100, (Math.min(totalItems, minMeals) / minMeals) * 100) : 100}%`,
+                  backgroundColor: totalItems >= minMeals ? "#6aab28" : "#f59e0b",
+                }}
+              />
+              {maxMeals > minMeals && <div className="absolute right-0 top-0 bottom-0 w-px bg-white/70 z-10" />}
+            </div>
+            {/* Extra zone: fills from minMeals to maxMeals in a lighter green */}
+            {maxMeals > minMeals && (
+              <div className="flex-1 h-full">
+                <div
+                  className="h-full transition-all duration-300"
+                  style={{
+                    width: `${totalItems > minMeals ? Math.min(100, ((totalItems - minMeals) / (maxMeals - minMeals)) * 100) : 0}%`,
+                    backgroundColor: "#8aaa70",
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="px-5 py-4 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
-              <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-800" : "text-amber-700"}`}>
-                {totalItems} of {maxMeals} meals
+              <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-700" : "text-amber-700"}`}>
+                {isValidTotal && totalItems >= maxMeals ? "🎉 " : ""}{totalItems}/{maxMeals} meals
               </p>
-              {!isValidTotal && (
-                <span className="text-xs text-stone-400">Pick {mealRangeLabel(minMeals, maxMeals)} to save</span>
+              {!isValidTotal && minMeals > totalItems && (
+                <span className="text-xs text-stone-600">Pick at least {minMeals - totalItems} more</span>
               )}
-              {savedOk && (
-                <span className="text-sm font-medium flex items-center gap-1 animate-fade-in" style={{ color: "#16a34a" }}>
+              {isValidTotal && totalItems < maxMeals && (
+                <span className="text-xs text-stone-500">You can add up to {maxMeals - totalItems} more</span>
+              )}
+              {savedOk && !hasChanges && (
+                <span className="text-sm font-medium flex items-center gap-1 animate-fade-in" style={{ color: "#508519" }}>
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
@@ -2691,12 +2992,258 @@ function MealGrid({
                   Saving...
                 </>
               ) : (
-                "Save Selections"
+                "Save selections"
               )}
             </button>
           </div>
+          </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
+    {detailItem && (
+      <MealDetailModal
+        item={detailItem.item}
+        index={detailItem.index}
+        totalItems={totalItems}
+        maxMeals={maxMeals}
+        chargeIsQueued={chargeIsQueued}
+        locked={locked}
+        isSaving={isSaving}
+        onAdjust={(delta) => { adjustQty(detailItem.index, delta); setDetailItem(d => d ? { ...d, item: { ...d.item, quantity: Math.max(0, d.item.quantity + delta) } } : null); }}
+        onClose={() => setDetailItem(null)}
+      />
+    )}
+    </div>
+  );
+}
+
+function StepperTip({ tip, children }: { tip?: string; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  if (!tip) return <>{children}</>;
+
+  const handleMouseEnter = () => {
+    const rect = ref.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.bottom + 8, left: rect.left + rect.width / 2 });
+  };
+
+  return (
+    <div ref={ref} onMouseEnter={handleMouseEnter} onMouseLeave={() => setPos(null)}>
+      {children}
+      {pos && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed pointer-events-none z-[9999]"
+          style={{ top: pos.top, left: pos.left, transform: "translateX(-50%)" }}
+        >
+          <div className="bg-stone-800 text-white text-xs rounded-md px-2.5 py-1.5 whitespace-nowrap shadow-lg" style={{ animation: "fadeIn 0.15s ease-out 0.25s both" }}>
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 border-4 border-transparent border-b-stone-800" />
+            {tip}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function MealDetailModal({
+  item,
+  index,
+  totalItems,
+  maxMeals,
+  chargeIsQueued,
+  locked,
+  isSaving,
+  onAdjust,
+  onClose,
+}: {
+  item: EditableItem;
+  index: number;
+  totalItems: number;
+  maxMeals: number;
+  chargeIsQueued: boolean;
+  locked: boolean;
+  isSaving: boolean;
+  onAdjust: (delta: number) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const ALLERGEN_TAGS = ["Gluten", "Dairy", "Eggs", "Meat", "Fish", "Shellfish", "Nuts", "Soy"];
+  const allergenTags = item.tags.filter(t => ALLERGEN_TAGS.some(a => a.toLowerCase() === t.toLowerCase()));
+  const otherTags = item.tags.filter(t => !ALLERGEN_TAGS.some(a => a.toLowerCase() === t.toLowerCase()));
+
+  const findMeta = (keys: string[]) => {
+    for (const key of keys) {
+      const tag = item.tags.find(t => t.toLowerCase().startsWith(key.toLowerCase() + ":"));
+      if (tag) return tag.split(":").slice(1).join(":").trim();
+    }
+    return null;
+  };
+
+  const prepTime = findMeta(["prep", "prep_time"]);
+  const cookTime = findMeta(["cook", "cook_time"]);
+  const totalTime = findMeta(["time", "total_time"]);
+  const calories = findMeta(["calories", "cal", "kcal"]);
+  const protein = findMeta(["protein"]);
+  const carbs = findMeta(["carbs", "carbohydrates"]);
+  const fat = findMeta(["fat"]);
+  const servings = findMeta(["servings", "serves"]);
+
+  const hasMeta = prepTime || cookTime || totalTime || calories;
+  const hasMacros = protein || carbs || fat;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={onClose} />
+      <div className="relative bg-white w-full sm:w-auto sm:max-w-md sm:mx-4 rounded-t-3xl sm:rounded-3xl shadow-2xl max-h-[92vh] overflow-y-auto scrollbar-hide animate-slide-up">
+        {/* Image */}
+        <div className="relative w-full aspect-[4/3] bg-stone-100 overflow-hidden rounded-t-3xl sm:rounded-t-3xl">
+          {item.imageUrl ? (
+            <img src={item.imageUrl} alt={item.productTitle} className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-stone-50 to-stone-100">
+              <svg className="w-16 h-16 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+          )}
+          <button
+            onClick={onClose}
+            className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white hover:bg-black/60 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="px-5 pt-4 pb-6 space-y-4">
+          {/* Title */}
+          <div>
+            <h2 className="font-display text-xl font-bold text-stone-900 leading-tight">{item.productTitle}</h2>
+            {item.variantTitle && item.variantTitle !== "Default Title" && (
+              <p className="text-sm text-stone-500 mt-0.5">{item.variantTitle}</p>
+            )}
+          </div>
+
+          {/* Time + calorie badges */}
+          {hasMeta && (
+            <div className="flex flex-wrap gap-2">
+              {prepTime && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-600">
+                  <svg className="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m4-2a8 8 0 11-16 0 8 8 0 0116 0z" />
+                  </svg>
+                  Prep: {prepTime}
+                </span>
+              )}
+              {cookTime && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-600">
+                  <svg className="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.362 5.214A8.252 8.252 0 0112 21 8.25 8.25 0 016.038 7.047 8.287 8.287 0 009 9.601a8.983 8.983 0 013.361-6.867 8.21 8.21 0 003 2.48z" />
+                  </svg>
+                  Cook: {cookTime}
+                </span>
+              )}
+              {calories && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-600">
+                  <svg className="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
+                  </svg>
+                  {calories} cal{servings ? ` · serves ${servings}` : ""}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Description */}
+          {item.description && (
+            <p className="text-sm text-stone-600 leading-relaxed">{item.description}</p>
+          )}
+
+          {/* Macros */}
+          {hasMacros && (
+            <div className="border border-stone-100 rounded-2xl p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-400 mb-3">Nutrition</p>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                {protein && (
+                  <div>
+                    <p className="text-lg font-bold text-stone-900">{protein}</p>
+                    <p className="text-xs text-stone-400">Protein</p>
+                  </div>
+                )}
+                {carbs && (
+                  <div>
+                    <p className="text-lg font-bold text-stone-900">{carbs}</p>
+                    <p className="text-xs text-stone-400">Carbs</p>
+                  </div>
+                )}
+                {fat && (
+                  <div>
+                    <p className="text-lg font-bold text-stone-900">{fat}</p>
+                    <p className="text-xs text-stone-400">Fat</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Allergen tags */}
+          {allergenTags.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-400 mb-2">Contains</p>
+              <div className="flex flex-wrap gap-1.5">
+                {allergenTags.map(t => (
+                  <span key={t} className="inline-flex items-center rounded-full bg-amber-50 border border-amber-200 px-2.5 py-0.5 text-xs font-medium text-amber-700">{t}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Other tags */}
+          {otherTags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {otherTags.map(t => (
+                <span key={t} className="inline-flex items-center rounded-full bg-stone-100 px-2.5 py-0.5 text-xs font-medium text-stone-500">{t}</span>
+              ))}
+            </div>
+          )}
+
+          {/* Quantity stepper */}
+          {chargeIsQueued && !locked && (
+            <div className="flex items-center justify-between pt-2 border-t border-stone-100">
+              <p className="text-sm font-semibold text-stone-700">Add to box</p>
+              <div className="flex items-center gap-3">
+                <StepperTip tip={item.quantity <= 0 ? "Not in your box yet" : undefined}>
+                  <button onClick={() => onAdjust(-1)} disabled={item.quantity <= 0 || isSaving} className="stepper-btn">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" d="M20 12H4" />
+                    </svg>
+                  </button>
+                </StepperTip>
+                <span className={`text-lg font-bold tabular-nums min-w-[24px] text-center ${item.quantity > 0 ? "text-stone-900" : "text-stone-300"}`}>
+                  {item.quantity}
+                </span>
+                <StepperTip tip={totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
+                  <button onClick={() => onAdjust(1)} disabled={totalItems >= maxMeals || isSaving} className="stepper-btn">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" d="M12 6v12M6 12h12" />
+                    </svg>
+                  </button>
+                </StepperTip>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2746,7 +3293,7 @@ function AddedAddonRow({
     ?? null;
 
   return (
-    <div className={`flex items-center gap-4 px-4 py-3 transition-opacity ${isRemoving ? "opacity-40" : ""}`}>
+    <div className={`flex items-center gap-4 px-4 py-3 bg-brand-50/60 animate-bounce-in transition-opacity ${isRemoving ? "opacity-40" : ""}`}>
       {imageUrl ? (
         <img
           src={imageUrl}
@@ -2762,9 +3309,14 @@ function AddedAddonRow({
       )}
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-stone-800 truncate">{item.title}</p>
+        <div className="flex items-center gap-1.5 mb-0.5">
+          <svg className="w-3.5 h-3.5 text-brand-600 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          <p className="text-sm font-semibold text-stone-800 truncate">{item.title}</p>
+        </div>
         {item.variant_title && item.variant_title !== "Default Title" && (
-          <p className="text-xs text-stone-400 truncate">{item.variant_title}</p>
+          <p className="text-xs text-stone-500 truncate">{item.variant_title}</p>
         )}
         {removeError && (
           <p className="text-xs text-red-600 mt-0.5">{removeError}</p>
@@ -2773,7 +3325,7 @@ function AddedAddonRow({
 
       <div className="flex items-center gap-1 flex-none">
         {item.quantity > 1 && (
-          <span className="text-xs text-stone-400 mr-1">x{item.quantity}</span>
+          <span className="text-xs text-stone-500 mr-1">x{item.quantity}</span>
         )}
         <span className="text-sm font-bold text-stone-900">{formatCurrency(item.total_price)}</span>
       </div>
@@ -2888,7 +3440,7 @@ function SimpleChargeRow({
     <div className="px-5 py-4 flex items-center gap-4 hover:bg-cream-dark/50 transition-colors">
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-stone-800">{formatDate(addDaysToDate(charge.scheduled_at, deliveryDateOffset))}</p>
-        <p className="text-xs text-stone-400">Charged on {formatDate(charge.scheduled_at)}</p>
+        <p className="text-xs text-stone-500">Charged on {formatDate(charge.scheduled_at)}</p>
         <div className="flex flex-wrap gap-1 mt-1">
           {charge.line_items.slice(0, 3).map((li, i) => (
             <span key={i} className="text-xs text-stone-500">
@@ -2898,7 +3450,7 @@ function SimpleChargeRow({
             </span>
           ))}
           {charge.line_items.length > 3 && (
-            <span className="text-xs text-stone-400">+{charge.line_items.length - 3} more</span>
+            <span className="text-xs text-stone-500">+{charge.line_items.length - 3} more</span>
           )}
         </div>
       </div>
@@ -2966,7 +3518,7 @@ function EmptyState() {
         </svg>
       </div>
       <h3 className="font-display font-semibold text-stone-700 mb-1">No upcoming deliveries</h3>
-      <p className="text-sm text-stone-400">Your next delivery hasn't been scheduled yet.</p>
+      <p className="text-sm text-stone-500">Your next delivery hasn't been scheduled yet.</p>
     </div>
   );
 }
@@ -2985,7 +3537,7 @@ function ReactivatePrompt({ subscription }: { subscription: { id: number; produc
         </svg>
       </div>
       <h3 className="font-display font-semibold text-stone-700 mb-1">Your subscription is cancelled</h3>
-      <p className="text-sm text-stone-400 mb-5">
+      <p className="text-sm text-stone-500 mb-5">
         {subscription.productTitle} is currently cancelled. Reactivate it to start choosing meals again.
       </p>
       <fetcher.Form method="post">

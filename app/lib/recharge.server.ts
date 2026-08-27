@@ -272,6 +272,7 @@ export async function getBundleCollectionsFromShopify(
           id: p.id,
           external_product_id: String(p.id),
           title: p.title,
+          description: p.body_html ? p.body_html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : null,
           image_url: p.image?.src ?? null,
           tags: p.tags ?? [],
           variants: p.variants.map((v) => ({

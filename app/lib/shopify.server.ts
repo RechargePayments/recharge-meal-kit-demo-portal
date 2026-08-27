@@ -73,6 +73,7 @@ const ShopifyVariantSchema = z.object({
 const ShopifyProductSchema = z.object({
   id: z.number(),
   title: z.string(),
+  body_html: z.string().nullable().optional(),
   variants: z.array(ShopifyVariantSchema),
   image: z.object({ src: z.string() }).nullable().optional(),
   tags: z.preprocess(
@@ -85,7 +86,7 @@ export type ShopifyProduct = z.infer<typeof ShopifyProductSchema>;
 
 export async function getCollectionProducts(collectionId: string): Promise<ShopifyProduct[]> {
   const data = await shopifyFetch<{ products: unknown[] }>(
-    `/products.json?collection_id=${collectionId}&fields=id,title,variants,image,tags&limit=250`
+    `/products.json?collection_id=${collectionId}&fields=id,title,body_html,variants,image,tags&limit=250`
   );
   return z.array(ShopifyProductSchema).parse(data.products);
 }

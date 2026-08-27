@@ -262,7 +262,7 @@ export default function AccountPage() {
                     <CardBrandIcon brand={pm.payment_details?.brand} />
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-stone-900">
-                        {pm.payment_details?.brand ?? "Card"} ending in {pm.payment_details?.last4 ?? "????"}
+                        <span className="capitalize">{pm.payment_details?.brand ?? "Card"}</span> ending in {pm.payment_details?.last4 ?? "????"}
                       </p>
                       <p className="text-xs text-stone-400">
                         Expires {pm.payment_details?.exp_month ?? "?"}/{pm.payment_details?.exp_year ?? "?"}
@@ -469,7 +469,15 @@ function SubscriptionSection({
               Do you want to cancel your subscription? You can reactivate it anytime.
             </p>
             {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-            <div className="flex items-center gap-3 mt-5">
+            <div className="flex items-center justify-end gap-3 mt-5">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmingCancel(false)}
+                className="px-4 py-2 text-sm font-medium text-stone-500 hover:text-stone-700 transition-colors"
+              >
+                Keep subscription
+              </button>
               <fetcher.Form method="post">
                 <input type="hidden" name="intent" value="cancel_subscription_demo" />
                 <input type="hidden" name="subscriptionId" value={subscription.id} />
@@ -481,14 +489,6 @@ function SubscriptionSection({
                   {busy && submittingIntent === "cancel_subscription_demo" ? "Cancelling…" : "Yes, cancel"}
                 </button>
               </fetcher.Form>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => setConfirmingCancel(false)}
-                className="px-4 py-2 text-sm font-medium text-stone-600 hover:text-stone-800 transition-colors"
-              >
-                Keep subscription
-              </button>
             </div>
           </div>
         </ModalShell>
@@ -540,8 +540,8 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto scrollbar-hide animate-scale-in">
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100">
           <h2 className="font-display font-semibold text-lg text-stone-900">{title}</h2>
           <button
@@ -753,7 +753,7 @@ function PaymentUpdateModal({
           <CardBrandIcon brand={paymentMethod.payment_details?.brand} />
           <div>
             <p className="text-sm font-medium text-stone-900">
-              {paymentMethod.payment_details?.brand ?? "Card"} ending in {paymentMethod.payment_details?.last4 ?? "????"}
+              <span className="capitalize">{paymentMethod.payment_details?.brand ?? "Card"}</span> ending in {paymentMethod.payment_details?.last4 ?? "????"}
             </p>
             <p className="text-xs text-stone-400">
               Expires {paymentMethod.payment_details?.exp_month ?? "?"}/{paymentMethod.payment_details?.exp_year ?? "?"}

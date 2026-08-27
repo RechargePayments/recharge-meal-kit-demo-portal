@@ -4,6 +4,18 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+@keyframes footerIn {
+  0%   { opacity: 0; transform: translateY(40px); }
+  55%  { opacity: 1; transform: translateY(-6px); }
+  75%  { transform: translateY(3px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
 @layer base {
   html {
     -webkit-font-smoothing: antialiased;
@@ -13,6 +25,11 @@
   body {
     font-family: "Inter", system-ui, sans-serif;
   }
+
+  /* Override Tailwind-generated cream — config changes require server restart, CSS does not */
+  .bg-cream { background-color: #FAF9F7 !important; }
+  .bg-cream-dark { background-color: #F3F0EC !important; }
+  .hover\:bg-cream-dark\/50:hover { background-color: rgba(243,240,236,0.5) !important; }
 
   h1, h2, h3, h4, h5, h6 {
     font-family: "DM Sans", system-ui, sans-serif;
@@ -40,20 +57,20 @@
   }
 
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-6 py-3 text-sm font-semibold text-white transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed;
-    background-color: #16a34a;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-6 py-3 text-sm font-semibold text-white transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed;
+    background-color: #508519;
   }
   .btn-primary:hover:not(:disabled) {
-    background-color: #15803d;
+    background-color: #3d6813;
     box-shadow: 0 4px 12px rgba(28, 25, 23, 0.07);
   }
 
   .btn-outline {
-    @apply inline-flex items-center justify-center gap-2 rounded-2xl border border-stone-200 bg-white px-5 py-2.5 text-sm font-medium text-stone-700 transition-all duration-200 hover:bg-stone-50 hover:border-stone-300 active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-stone-200 bg-white px-5 py-2.5 text-sm font-medium text-stone-700 transition-all duration-200 hover:bg-stone-50 hover:border-stone-300 active:scale-[0.98];
   }
 
   .btn-danger-ghost {
-    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-medium text-stone-400 transition-all duration-200 hover:text-red-600 hover:bg-red-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-stone-400 transition-all duration-200 hover:text-red-600 hover:bg-red-50;
   }
 
   .badge {
@@ -61,7 +78,13 @@
   }
 
   .stepper-btn {
-    @apply w-9 h-9 rounded-full flex items-center justify-center text-white transition-all duration-150 active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed;
+    @apply w-8 h-8 rounded-full flex items-center justify-center border border-stone-300 text-stone-500 bg-white transition-all duration-150 hover:border-stone-400 hover:text-stone-700 hover:bg-stone-50 active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed;
+  }
+
+  .skeleton {
+    background: linear-gradient(90deg, #e7e5e4 25%, #f5f4f3 50%, #e7e5e4 75%);
+    background-size: 800px 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
   }
 }
 

@@ -14,30 +14,31 @@ export default {
     "from-brand-500", "to-brand-400", "from-brand-800", "via-brand-700", "to-brand-600",
     "shadow-glow", "shadow-warm-sm", "shadow-warm-md",
     "hover:shadow-warm-sm", "hover:shadow-warm-md",
-    "animate-pulse-soft", "animate-fade-in", "animate-slide-up", "animate-check-pop",
+    "animate-pulse-soft", "animate-fade-in", "animate-slide-up", "animate-check-pop", "animate-bounce-in", "animate-shimmer", "skeleton",
     "bg-cream", "bg-cream-dark", "bg-cream-dark/50",
   ],
   theme: {
     extend: {
       colors: {
         brand: {
-          50: "#f0fdf4",
-          100: "#dcfce7",
-          200: "#bbf7d0",
-          300: "#86efac",
-          400: "#4ade80",
-          500: "#22c55e",
-          600: "#16a34a",
-          700: "#15803d",
-          800: "#166534",
-          900: "#14532d",
-          950: "#052e16",
+          50:  "#f0f3eb",  // barely-there warm sage
+          100: "#dde5d4",  // muted sage
+          200: "#b8c9a9",  // sage
+          300: "#8aaa70",  // muted sage-green
+          400: "#6a9152",  // olive
+          500: "#548534",  // medium olive
+          600: "#508519",  // logo mark — button base
+          700: "#3c6613",
+          800: "#2b490e",
+          900: "#1c3829",  // logo dark forest green
+          950: "#0f2118",
         },
-        cream: "#FEFCF3",
-        "cream-dark": "#FBF7ED",
+        cream: "#F8F3EF",
+        "cream-dark": "#EFE7E0",
         surface: "#FFFFFF",
-        accent: "#F4A261",
-        "accent-dark": "#E76F51",
+        accent: "#E87B30",       // logo carrot orange
+        "accent-dark": "#C45E1A",
+        "accent-light": "#FDE8CC",
       },
       fontFamily: {
         display: ['"DM Sans"', "system-ui", "sans-serif"],
@@ -82,6 +83,15 @@ export default {
           "60%": { transform: "scale(1.2)", opacity: "1" },
           "100%": { transform: "scale(1)", opacity: "1" },
         },
+        bounceIn: {
+          "0%": { transform: "scale(0.85) translateY(4px)", opacity: "0" },
+          "60%": { transform: "scale(1.04) translateY(-2px)", opacity: "1" },
+          "100%": { transform: "scale(1) translateY(0)", opacity: "1" },
+        },
+        shimmer: {
+          "0%": { backgroundPosition: "-400px 0" },
+          "100%": { backgroundPosition: "400px 0" },
+        },
       },
       animation: {
         "fade-in": "fadeIn 0.3s ease-out forwards",
@@ -90,6 +100,8 @@ export default {
         "pulse-soft": "pulseSoft 2s ease-in-out infinite",
         "fill-bar": "fillBar 0.6s ease-out forwards",
         "check-pop": "checkPop 0.3s ease-out forwards",
+        "bounce-in": "bounceIn 0.35s ease-out forwards",
+        "shimmer": "shimmer 1.6s ease-in-out infinite",
       },
     },
   },

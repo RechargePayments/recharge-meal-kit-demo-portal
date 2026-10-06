@@ -306,23 +306,31 @@ export async function getBundleProductInfo(externalProductId: string): Promise<{
 }> {
   const data = await api<{
     bundle_products: Array<{
+      external_product_id: string;
       variants: Array<{
         option_sources: Array<{ option_source_id: string }>;
         ranges?: Array<{ id: number; quantity_min: number; quantity_max: number }>;
       }>;
     }>;
-  }>(`/bundle_products?external_product_id=${externalProductId}&limit=25`);
+  }>(`/bundle_products?external_product_id=${externalProductId}&limit=250`);
+
+  // The API ignores the external_product_id filter and returns every bundle
+  // product, so narrow to the requested one here — otherwise collections and
+  // ranges from other bundles leak in and saves fail validation.
+  const bundleProducts = data.bundle_products.filter(
+    (bp) => String(bp.external_product_id) === String(externalProductId)
+  );
 
   const collectionIds = [
     ...new Set(
-      data.bundle_products.flatMap((bp) =>
+      bundleProducts.flatMap((bp) =>
         bp.variants.flatMap((v) => v.option_sources.map((os) => os.option_source_id))
       )
     ),
   ];
 
   const seenIds = new Set<number>();
-  const quantityRanges = data.bundle_products
+  const quantityRanges = bundleProducts
     .flatMap((bp) => bp.variants.flatMap((v) => v.ranges ?? []))
     .filter((r) => {
       if (seenIds.has(r.id)) return false;

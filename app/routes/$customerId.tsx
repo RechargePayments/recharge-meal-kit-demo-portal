@@ -158,6 +158,19 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   }
 
   const subscriptionById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+
+  // Whether a charge belongs to a subscription. Normally that's a subscription
+  // line item, but freshly generated future charges can arrive with no line
+  // items at all — for those, fall back to matching the subscription's address.
+  function chargeReferencesSubscription(charge: Charge, subscriptionId: number): boolean {
+    const subscriptionLineItems = charge.line_items.filter((li) => li.purchase_item_type === "subscription");
+    if (subscriptionLineItems.length > 0) {
+      return subscriptionLineItems.some((li) => li.purchase_item_id === subscriptionId);
+    }
+    const subscription = subscriptionById.get(subscriptionId);
+    return subscription != null && charge.address_id != null && charge.address_id === subscription.address_id;
+  }
+
   const bundleSubscriptionMap = new Map<number, BundleSubscriptionTab>();
 
   // Helper: register a charge under a subscription (deduped chargeIds)
@@ -210,11 +223,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     const subProductId = subscription.external_product_id?.ecommerce;
     if (!subProductId || !bundleProductIds.has(subProductId)) continue;
     for (const { charge } of chargesBundleCheck) {
-      if (
-        charge.line_items.some(
-          (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === subscription.id
-        )
-      ) {
+      if (chargeReferencesSubscription(charge, subscription.id)) {
         registerChargeForSubscription(subscription.id, charge.id);
       }
     }
@@ -262,9 +271,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
   function chargeBelongsToSubscription(cb: { charge: Charge; bundleSelections: BundleSelection[] }, purchaseItemId: number): boolean {
     if (cb.bundleSelections.some((selection) => selection.purchase_item_id === purchaseItemId)) return true;
-    return cb.charge.line_items.some(
-      (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === purchaseItemId
-    );
+    return chargeReferencesSubscription(cb.charge, purchaseItemId);
   }
 
   const chargesForActiveSubscription = activeSubscription
@@ -308,10 +315,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     // subscription's product info. The customer can then pick meals and we'll
     // create a real bundle_selection on save.
     if (bundleSelections.length === 0) {
-      const subscriptionLineItem = charge.line_items.find(
-        (li) => li.purchase_item_type === "subscription" && li.purchase_item_id === activeSubscription.purchaseItemId
-      );
-      if (subscriptionLineItem) {
+      if (chargeReferencesSubscription(charge, activeSubscription.purchaseItemId)) {
         const subscription = subscriptionById.get(activeSubscription.purchaseItemId)
           ?? await getSubscription(activeSubscription.purchaseItemId).catch(() => null);
         const synthExternalProductId = subscription?.external_product_id?.ecommerce ?? null;
@@ -342,7 +346,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
         bundleProducts.find((p) =>
           p.variants.some((v) => v.external_variant_id === activeBundleVariantId)
         )?.id ?? null;
-      const eligibleCollectionIds =
+      const presetCollectionIds =
         activeBundleProductId != null
           ? await listPresetSchedules({ bundleProductId: activeBundleProductId })
               .then((rows) =>
@@ -352,6 +356,13 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
               )
               .catch(() => [] as string[])
           : [];
+
+      // A preset schedule for the week is the merchant's curated menu. Without
+      // one, fall back to the collections assigned to the bundle product so the
+      // customer can browse the full bundle catalog, not just current picks.
+      const bundleCollectionIds = bundleProductInfoList.flatMap((info) => info.collectionIds);
+      const eligibleCollectionIds =
+        presetCollectionIds.length > 0 ? presetCollectionIds : bundleCollectionIds;
 
       const hasPresetForWeek = eligibleCollectionIds.length > 0;
 

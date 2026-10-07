@@ -237,13 +237,15 @@ export async function getBundleSelections(chargeId: number): Promise<BundleSelec
   return z.array(BundleSelectionSchema).parse(data.bundle_selections);
 }
 
+// charge_id is null for a subscription-level selection — the default contents
+// Recharge applies to charges that have no charge-specific selection.
 const BundleSelectionWithChargeIdSchema = BundleSelectionSchema.extend({
-  charge_id: z.number(),
+  charge_id: z.number().nullable(),
 });
 
 export async function listBundleSelectionsByPurchaseItemIds(
   purchaseItemIds: number[]
-): Promise<Array<BundleSelection & { charge_id: number }>> {
+): Promise<Array<BundleSelection & { charge_id: number | null }>> {
   const uniqueIds = [...new Set(purchaseItemIds)];
   if (uniqueIds.length === 0) return [];
 

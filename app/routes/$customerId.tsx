@@ -124,16 +124,26 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   ];
 
   let chargesBundleCheck: Array<{ charge: Charge; bundleSelections: BundleSelection[] }>;
+  // Subscription-level selections (no charge_id), keyed by purchase item. These
+  // are the contents a charge gets when it has no charge-specific selection.
+  const defaultSelectionByPurchaseItem = new Map<number, BundleSelection>();
 
   if (subscriptionPurchaseItemIds.length === 0) {
     chargesBundleCheck = activeCharges.map((charge) => ({ charge, bundleSelections: [] }));
   } else {
     try {
-      const allBundleSelections = await listBundleSelectionsByPurchaseItemIds(subscriptionPurchaseItemIds);
+      const allBundleSelections = await listBundleSelectionsByPurchaseItemIds([
+        ...subscriptionPurchaseItemIds,
+        ...subscriptions.map((subscription) => subscription.id),
+      ]);
       const bundleSelectionsByCharge = new Map<number, BundleSelection[]>();
 
       for (const selection of allBundleSelections) {
         const { charge_id, ...bundleSelection } = selection;
+        if (charge_id == null) {
+          defaultSelectionByPurchaseItem.set(bundleSelection.purchase_item_id, bundleSelection);
+          continue;
+        }
         const existing = bundleSelectionsByCharge.get(charge_id);
         if (existing) {
           existing.push(bundleSelection);
@@ -162,13 +172,20 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   // Whether a charge belongs to a subscription. Normally that's a subscription
   // line item, but freshly generated future charges can arrive with no line
   // items at all — for those, fall back to matching the subscription's address.
+  // A subscription can't own a charge scheduled before its next charge date,
+  // which keeps empty charges from showing under every subscription at the
+  // same address.
   function chargeReferencesSubscription(charge: Charge, subscriptionId: number): boolean {
     const subscriptionLineItems = charge.line_items.filter((li) => li.purchase_item_type === "subscription");
     if (subscriptionLineItems.length > 0) {
       return subscriptionLineItems.some((li) => li.purchase_item_id === subscriptionId);
     }
     const subscription = subscriptionById.get(subscriptionId);
-    return subscription != null && charge.address_id != null && charge.address_id === subscription.address_id;
+    if (subscription == null || charge.address_id == null || charge.address_id !== subscription.address_id) {
+      return false;
+    }
+    const nextChargeDate = subscription.next_charge_scheduled_at?.slice(0, 10);
+    return nextChargeDate == null || charge.scheduled_at.slice(0, 10) >= nextChargeDate;
   }
 
   const bundleSubscriptionMap = new Map<number, BundleSubscriptionTab>();
@@ -313,20 +330,22 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     // no bundle_selection (e.g. it was just unskipped, or was created without
     // any customer customization), build a synthetic placeholder using the
     // subscription's product info. The customer can then pick meals and we'll
-    // create a real bundle_selection on save.
+    // create a real bundle_selection on save. Pre-fill it with the
+    // subscription-level selection, since that's what the charge will ship.
     if (bundleSelections.length === 0) {
       if (chargeReferencesSubscription(charge, activeSubscription.purchaseItemId)) {
         const subscription = subscriptionById.get(activeSubscription.purchaseItemId)
           ?? await getSubscription(activeSubscription.purchaseItemId).catch(() => null);
         const synthExternalProductId = subscription?.external_product_id?.ecommerce ?? null;
         const synthExternalVariantId = subscription?.external_variant_id?.ecommerce ?? null;
+        const defaultSelection = defaultSelectionByPurchaseItem.get(activeSubscription.purchaseItemId);
         if (synthExternalProductId) {
           bundleSelections = [{
             id: 0,
             purchase_item_id: activeSubscription.purchaseItemId,
             external_product_id: synthExternalProductId,
             external_variant_id: synthExternalVariantId,
-            items: [],
+            items: defaultSelection?.external_product_id === synthExternalProductId ? defaultSelection.items : [],
           }];
         }
       }

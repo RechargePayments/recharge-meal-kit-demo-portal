@@ -44,7 +44,7 @@ import {
   saveAddonCollectionIds,
 } from "~/lib/addon-collections.server";
 import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW } from "~/lib/bundle-config";
-import type { BundleCollection } from "~/lib/types";
+import type { BundleCollection, BundleSelection } from "~/lib/types";
 
 export const meta: MetaFunction = () => [{ title: "Merchant Portal — Weekly Collections" }];
 
@@ -58,8 +58,10 @@ async function resolveBundleProductId(externalVariantId: string): Promise<number
   return null;
 }
 
+// One per bundle subscription on a charge — a charge can hold several.
 type ApplyChargeResult = {
   chargeId: number;
+  purchaseItemId: number;
   customerId: number | null;
   status: "success" | "created" | "error";
   error?: string;
@@ -361,35 +363,53 @@ export async function action({ request }: ActionFunctionArgs) {
         charge.line_items.some((li) => bundleSubIds.has(li.purchase_item_id))
       );
 
-      const results: ApplyChargeResult[] = await Promise.all(
-        bundleCharges.map(async (charge) => {
-          const bundlePurchaseItemId = charge.line_items.find(
-            (li) => bundleSubIds.has(li.purchase_item_id)
-          )!.purchase_item_id;
-          const customerId = charge.customer?.id ? String(charge.customer.id) : null;
-          const preferences = customerId
-            ? await getCustomerPreferencesById(customerId).catch(() => null)
+      const results: ApplyChargeResult[] = (await Promise.all(
+        bundleCharges.map(async (charge): Promise<ApplyChargeResult[]> => {
+          const bundlePurchaseItemIds = [
+            ...new Set(
+              charge.line_items
+                .filter((li) => li.purchase_item_type === "subscription" && bundleSubIds.has(li.purchase_item_id))
+                .map((li) => li.purchase_item_id)
+            ),
+          ];
+          const customerId = charge.customer?.id ?? null;
+          const preferences = customerId != null
+            ? await getCustomerPreferencesById(String(customerId)).catch(() => null)
             : null;
           const items = computePersonalizedSelection(sortedProducts, targetQuantity, preferences);
+          const result = (purchaseItemId: number, outcome: Pick<ApplyChargeResult, "status" | "error">) =>
+            ({ chargeId: charge.id, purchaseItemId, customerId, ...outcome });
 
+          let selections: BundleSelection[];
           try {
-            const selections = await getBundleSelections(charge.id);
-            if (selections.length === 0) {
-              await createBundleSelection(charge.id, bundlePurchaseItemId, items);
-              return { chargeId: charge.id, customerId: charge.customer?.id ?? null, status: "created" as const };
-            }
-            await Promise.all(selections.map((sel) => updateBundleSelection(sel.id, items)));
-            return { chargeId: charge.id, customerId: charge.customer?.id ?? null, status: "success" as const };
+            selections = await getBundleSelections(charge.id);
           } catch (err) {
-            return {
-              chargeId: charge.id,
-              customerId: charge.customer?.id ?? null,
-              status: "error" as const,
-              error: err instanceof Error ? err.message : "Unknown error",
-            };
+            const error = err instanceof Error ? err.message : "Unknown error";
+            return bundlePurchaseItemIds.map((id) => result(id, { status: "error", error }));
           }
+
+          // Each subscription on the charge gets its own selection: update the
+          // one it has, or create it.
+          return Promise.all(
+            bundlePurchaseItemIds.map(async (purchaseItemId) => {
+              const existing = selections.find((sel) => sel.purchase_item_id === purchaseItemId);
+              try {
+                if (existing) {
+                  await updateBundleSelection(existing.id, items);
+                  return result(purchaseItemId, { status: "success" });
+                }
+                await createBundleSelection(charge.id, purchaseItemId, items);
+                return result(purchaseItemId, { status: "created" });
+              } catch (err) {
+                return result(purchaseItemId, {
+                  status: "error",
+                  error: err instanceof Error ? err.message : "Unknown error",
+                });
+              }
+            })
+          );
         })
-      );
+      )).flat();
 
       return json({
         type: "apply_result" as const,
@@ -1285,14 +1305,14 @@ function WeekPanel({
                 ) : (
                   <>
                     <p className="text-sm font-medium text-gray-800">
-                      Personalized and applied to {appliedCount} of {applyResult.results.length} eligible charge{applyResult.results.length !== 1 ? "s" : ""}
+                      Personalized and applied to {appliedCount} of {applyResult.results.length} eligible subscription{applyResult.results.length !== 1 ? "s" : ""}
                       {createdCount > 0 && (
                         <span className="text-gray-400 font-normal"> · {createdCount} new</span>
                       )}
                     </p>
                     <ul className="space-y-1.5 mt-1">
                       {applyResult.results.map((r) => (
-                        <li key={r.chargeId} className="flex items-start gap-2 text-sm">
+                        <li key={`${r.chargeId}-${r.purchaseItemId}`} className="flex items-start gap-2 text-sm">
                           {(r.status === "success" || r.status === "created") && (
                             <svg className="w-3.5 h-3.5 text-green-600 mt-0.5 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -1304,7 +1324,7 @@ function WeekPanel({
                             </svg>
                           )}
                           <span className={r.status === "error" ? "text-red-700" : "text-gray-600"}>
-                            Charge #{r.chargeId}
+                            Charge #{r.chargeId} · subscription #{r.purchaseItemId}
                             {r.customerId && <span className="text-gray-400"> (customer {r.customerId})</span>}
                             {r.status === "created" && " — created"}
                             {r.status === "error" && r.error && ` — ${r.error}`}

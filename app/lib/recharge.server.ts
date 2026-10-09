@@ -4,6 +4,7 @@ import {
   SubscriptionSchema,
   ChargeSchema,
   BundleSelectionSchema,
+  BundleSelectionItemSchema,
   BundleCollectionSchema,
   BundleProductSchema,
   CreditSummarySchema,
@@ -17,6 +18,8 @@ import {
   type BundleCollection,
   type BundleProduct,
   type BundleItemPayload,
+  type DefaultBundleItem,
+  type QuantityRange,
   type CreditSummary,
   type Address,
   type PaymentMethod,
@@ -238,21 +241,48 @@ export async function getBundleSelections(chargeId: number): Promise<BundleSelec
 }
 
 // charge_id is null for a subscription-level selection — the default contents
-// Recharge applies to charges that have no charge-specific selection.
-const BundleSelectionWithChargeIdSchema = BundleSelectionSchema.extend({
+// Recharge applies to charges that have no charge-specific selection. When the
+// subscription has no selection at all, Recharge synthesizes one from the
+// bundle variant's selection_defaults (is_fallback), with a null id and null
+// item collections.
+const PurchaseItemBundleSelectionSchema = BundleSelectionSchema.extend({
+  id: z.number().nullable(),
   charge_id: z.number().nullable(),
+  items: z.array(BundleSelectionItemSchema.extend({ collection_id: z.string().nullable() })),
 });
 
-export async function listBundleSelectionsByPurchaseItemIds(
-  purchaseItemIds: number[]
-): Promise<Array<BundleSelection & { charge_id: number | null }>> {
+export type SubscriptionDefaultSelection = {
+  external_product_id: string | null;
+  items: DefaultBundleItem[];
+};
+
+export async function listBundleSelectionsByPurchaseItemIds(purchaseItemIds: number[]): Promise<{
+  chargeSelections: Array<{ chargeId: number; selection: BundleSelection }>;
+  defaultsByPurchaseItem: Map<number, SubscriptionDefaultSelection>;
+}> {
+  const chargeSelections: Array<{ chargeId: number; selection: BundleSelection }> = [];
+  const defaultsByPurchaseItem = new Map<number, SubscriptionDefaultSelection>();
   const uniqueIds = [...new Set(purchaseItemIds)];
-  if (uniqueIds.length === 0) return [];
+  if (uniqueIds.length === 0) return { chargeSelections, defaultsByPurchaseItem };
 
   const data = await api<{ bundle_selections: unknown[] }>(
     `/bundle_selections?purchase_item_ids=${uniqueIds.join(",")}&limit=250`
   );
-  return z.array(BundleSelectionWithChargeIdSchema).parse(data.bundle_selections);
+  for (const { charge_id, ...selection } of z.array(PurchaseItemBundleSelectionSchema).parse(data.bundle_selections)) {
+    if (charge_id == null) {
+      defaultsByPurchaseItem.set(selection.purchase_item_id, {
+        external_product_id: selection.external_product_id ?? null,
+        items: selection.items.map(({ collection_id, external_variant_id, quantity }) => ({
+          collection_id,
+          external_variant_id,
+          quantity,
+        })),
+      });
+    } else {
+      chargeSelections.push({ chargeId: charge_id, selection: BundleSelectionSchema.parse(selection) });
+    }
+  }
+  return { chargeSelections, defaultsByPurchaseItem };
 }
 
 export async function getBundleCollectionsFromShopify(
@@ -304,14 +334,14 @@ export async function listBundleProducts(): Promise<BundleProduct[]> {
 
 export async function getBundleProductInfo(externalProductId: string): Promise<{
   collectionIds: string[];
-  quantityRanges: number[][];
+  quantityRanges: QuantityRange[];
 }> {
   const data = await api<{
     bundle_products: Array<{
       external_product_id: string;
       variants: Array<{
         option_sources: Array<{ option_source_id: string }>;
-        ranges?: Array<{ id: number; quantity_min: number; quantity_max: number }>;
+        ranges?: Array<{ id: number; quantity_min: number; quantity_max: number | null }>;
       }>;
     }>;
   }>(`/bundle_products?external_product_id=${externalProductId}&limit=250`);
@@ -339,11 +369,15 @@ export async function getBundleProductInfo(externalProductId: string): Promise<{
       seenIds.add(r.id);
       return true;
     })
-    .map((r) => [r.quantity_min, r.quantity_max]);
+    .map((r): QuantityRange => [r.quantity_min, r.quantity_max]);
 
   return { collectionIds, quantityRanges };
 }
 
+// Selections belong to a charge, never to the subscription. charge_id isn't in
+// the public docs for create but is honored; if Recharge ever returns a
+// selection without our charge, delete it rather than leave a subscription-
+// level selection behind.
 export async function createBundleSelection(
   chargeId: number,
   purchaseItemId: number,
@@ -353,7 +387,13 @@ export async function createBundleSelection(
     method: "POST",
     body: JSON.stringify({ charge_id: chargeId, purchase_item_id: purchaseItemId, items }),
   });
-  return BundleSelectionSchema.parse(data.bundle_selection);
+  const { charge_id, ...selection } = BundleSelectionSchema.extend({ charge_id: z.number().nullable() })
+    .parse(data.bundle_selection);
+  if (charge_id !== chargeId) {
+    await api(`/bundle_selections/${selection.id}`, { method: "DELETE" }).catch(() => undefined);
+    throw new Error(`Recharge saved the selection without charge ${chargeId}.`);
+  }
+  return selection;
 }
 
 export async function updateBundleSelection(

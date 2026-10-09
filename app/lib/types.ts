@@ -150,6 +150,17 @@ export const BundleSelectionSchema = z.object({
 
 export type BundleSelection = z.infer<typeof BundleSelectionSchema>;
 
+// What a charge ships when it has no charge-specific bundle selection. The
+// collection is unknown when the contents come from the bundle's defaults.
+export type DefaultBundleItem = {
+  collection_id: string | null;
+  external_variant_id: string;
+  quantity: number;
+};
+
+// [quantity_min, quantity_max]; a null max means there is no upper limit.
+export type QuantityRange = [number, number | null];
+
 // ─── Bundle Collections ───────────────────────────────────────────────────────
 
 export const BundleCollectionVariantSchema = z.object({
@@ -195,6 +206,10 @@ export const BundleProductVariantSchema = z.object({
   id: z.number(),
   external_variant_id: z.string(),
   title: z.string(),
+  // The contents Recharge ships when a subscription has no selection of its own.
+  selection_defaults: z
+    .array(z.object({ external_variant_id: z.string(), quantity: z.number() }))
+    .optional(),
 });
 
 export type BundleProductVariant = z.infer<typeof BundleProductVariantSchema>;
@@ -317,7 +332,8 @@ export type Plan = z.infer<typeof PlanSchema>;
 
 // ─── API update payload ───────────────────────────────────────────────────────
 
+// collection_id is null for a default meal that isn't in any bundle collection.
 export type BundleItemPayload = Pick<
   BundleSelectionItem,
-  "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity"
->;
+  "collection_source" | "external_product_id" | "external_variant_id" | "quantity"
+> & { collection_id: string | null };

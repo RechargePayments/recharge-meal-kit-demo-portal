@@ -24,6 +24,7 @@ import {
   unskipCharge,
   updateAddress,
   updateBundleSelection,
+  type SubscriptionDefaultSelection,
 } from "~/lib/recharge.server";
 import { requireCustomerOwnsId } from "~/lib/auth.server";
 import { listPresetSchedules } from "~/lib/preset-schedules.server";
@@ -35,11 +36,68 @@ import {
   isChargeLocked,
 } from "~/lib/merchant-settings.server";
 import { getAddonCollectionIds } from "~/lib/addon-collections.server";
+import { getProductsByVariantIds } from "~/lib/shopify.server";
 import { DEFAULT_DELIVERY_OFFSET, DEFAULT_MODIFICATION_WINDOW, LEGACY_BUNDLE_VARIANT_ID } from "~/lib/bundle-config";
-import type { Address, BundleCollection, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, Subscription } from "~/lib/types";
+import type { Address, BundleCollection, BundleItemPayload, BundleSelection, BundleSelectionItem, Charge, ChargeLineItem, CreditSummary, Customer, DefaultBundleItem, QuantityRange, Subscription } from "~/lib/types";
 import { formatCurrency, formatDate } from "~/lib/utils";
 
 export const meta: MetaFunction = () => [{ title: "NourishBox — My Deliveries" }];
+
+// Turn default contents into selection items by finding each variant in the
+// available collections. Defaults that aren't in any of them come back as
+// `offMenu`.
+function resolveDefaultItems(
+  defaults: DefaultBundleItem[],
+  collections: BundleCollection[]
+): { items: BundleSelectionItem[]; offMenu: DefaultBundleItem[] } {
+  const items: BundleSelectionItem[] = [];
+  const offMenu: DefaultBundleItem[] = [];
+  for (const item of defaults) {
+    const candidates = item.collection_id
+      ? collections.filter((c) => c.id === item.collection_id)
+      : collections;
+    const match = candidates
+      .flatMap((collection) => collection.products.map((product) => ({ collection, product })))
+      .find(({ product }) => product.variants.some((v) => String(v.id) === item.external_variant_id));
+    if (match) {
+      items.push({
+        id: 0,
+        collection_id: match.collection.id,
+        collection_source: "shopify",
+        external_product_id: match.product.external_product_id,
+        external_variant_id: item.external_variant_id,
+        quantity: item.quantity,
+      });
+    } else {
+      offMenu.push(item);
+    }
+  }
+  return { items, offMenu };
+}
+
+// Default meals that aren't in any bundle collection, shown from their Shopify
+// product. Variants that no longer exist are dropped.
+async function loadOffMenuItems(defaults: DefaultBundleItem[]): Promise<EditableItem[]> {
+  const products = await getProductsByVariantIds(defaults.map((d) => d.external_variant_id));
+  return defaults.flatMap((item) => {
+    const product = products.get(item.external_variant_id);
+    const variant = product?.variants.find((v) => String(v.id) === item.external_variant_id);
+    if (!product || !variant) return [];
+    return [{
+      collection_id: null,
+      collection_source: "shopify",
+      external_product_id: String(product.id),
+      external_variant_id: item.external_variant_id,
+      quantity: item.quantity,
+      productTitle: product.title,
+      variantTitle: variant.title,
+      imageUrl: product.image?.src ?? null,
+      tags: product.tags ?? [],
+      description: product.body_html ? product.body_html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : null,
+      offMenu: true,
+    }];
+  });
+}
 
 function getMondayOf(dateStr: string): string {
   const d = new Date(dateStr.slice(0, 10) + "T00:00:00");
@@ -63,7 +121,10 @@ type ActiveChargeBundle = {
   bundleSelections: BundleSelection[];
   subscriptionTitles: Record<number, string>;
   collectionsByProductId: Record<string, BundleCollection[]>;
-  bundleProductRangesByProductId: Record<string, number[][]>;
+  bundleProductRangesByProductId: Record<string, QuantityRange[]>;
+  // Default meals for a charge without a selection that aren't in any bundle
+  // collection. Only set on the synthetic placeholder selection.
+  offMenuItems: EditableItem[];
   eligibleCollectionIds: string[];
   hasPresetForWeek: boolean;
 };
@@ -126,29 +187,25 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   let chargesBundleCheck: Array<{ charge: Charge; bundleSelections: BundleSelection[] }>;
   // Subscription-level selections (no charge_id), keyed by purchase item. These
   // are the contents a charge gets when it has no charge-specific selection.
-  const defaultSelectionByPurchaseItem = new Map<number, BundleSelection>();
+  let defaultSelectionByPurchaseItem = new Map<number, SubscriptionDefaultSelection>();
 
   if (subscriptionPurchaseItemIds.length === 0) {
     chargesBundleCheck = activeCharges.map((charge) => ({ charge, bundleSelections: [] }));
   } else {
     try {
-      const allBundleSelections = await listBundleSelectionsByPurchaseItemIds([
+      const { chargeSelections, defaultsByPurchaseItem } = await listBundleSelectionsByPurchaseItemIds([
         ...subscriptionPurchaseItemIds,
         ...subscriptions.map((subscription) => subscription.id),
       ]);
+      defaultSelectionByPurchaseItem = defaultsByPurchaseItem;
       const bundleSelectionsByCharge = new Map<number, BundleSelection[]>();
 
-      for (const selection of allBundleSelections) {
-        const { charge_id, ...bundleSelection } = selection;
-        if (charge_id == null) {
-          defaultSelectionByPurchaseItem.set(bundleSelection.purchase_item_id, bundleSelection);
-          continue;
-        }
-        const existing = bundleSelectionsByCharge.get(charge_id);
+      for (const { chargeId, selection } of chargeSelections) {
+        const existing = bundleSelectionsByCharge.get(chargeId);
         if (existing) {
-          existing.push(bundleSelection);
+          existing.push(selection);
         } else {
-          bundleSelectionsByCharge.set(charge_id, [bundleSelection]);
+          bundleSelectionsByCharge.set(chargeId, [selection]);
         }
       }
 
@@ -330,8 +387,10 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     // no bundle_selection (e.g. it was just unskipped, or was created without
     // any customer customization), build a synthetic placeholder using the
     // subscription's product info. The customer can then pick meals and we'll
-    // create a real bundle_selection on save. Pre-fill it with the
-    // subscription-level selection, since that's what the charge will ship.
+    // create a real bundle_selection on save. Pre-fill it with what the charge
+    // will ship: the subscription-level selection, else the bundle variant's
+    // selection_defaults.
+    let placeholderDefaults: DefaultBundleItem[] = [];
     if (bundleSelections.length === 0) {
       if (chargeReferencesSubscription(charge, activeSubscription.purchaseItemId)) {
         const subscription = subscriptionById.get(activeSubscription.purchaseItemId)
@@ -340,12 +399,20 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
         const synthExternalVariantId = subscription?.external_variant_id?.ecommerce ?? null;
         const defaultSelection = defaultSelectionByPurchaseItem.get(activeSubscription.purchaseItemId);
         if (synthExternalProductId) {
+          placeholderDefaults =
+            defaultSelection?.external_product_id === synthExternalProductId
+              ? defaultSelection.items
+              : (bundleProducts
+                  .flatMap((p) => p.variants)
+                  .find((v) => v.external_variant_id === synthExternalVariantId)
+                  ?.selection_defaults ?? []
+                ).map((d) => ({ collection_id: null, ...d }));
           bundleSelections = [{
             id: 0,
             purchase_item_id: activeSubscription.purchaseItemId,
             external_product_id: synthExternalProductId,
             external_variant_id: synthExternalVariantId,
-            items: defaultSelection?.external_product_id === synthExternalProductId ? defaultSelection.items : [],
+            items: [],
           }];
         }
       }
@@ -385,16 +452,28 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
 
       const hasPresetForWeek = eligibleCollectionIds.length > 0;
 
-      const selectionCollectionIds = bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id));
+      // Defaults may come from anywhere in the bundle's catalog, not just this
+      // week's menu, so load all of the bundle's collections to match them.
+      const selectionCollectionIds = [
+        ...bundleSelections.flatMap((bs) => bs.items.map((i) => i.collection_id)),
+        ...placeholderDefaults.flatMap((d) => (d.collection_id ? [d.collection_id] : [])),
+        ...(placeholderDefaults.length > 0 ? bundleCollectionIds : []),
+      ];
       const collectionIds = [...new Set([...eligibleCollectionIds, ...selectionCollectionIds])];
 
       const availableCollections = await getBundleCollectionsFromShopify(collectionIds);
+      let offMenuItems: EditableItem[] = [];
+      if (placeholderDefaults.length > 0) {
+        const resolved = resolveDefaultItems(placeholderDefaults, availableCollections);
+        bundleSelections[0].items = resolved.items;
+        offMenuItems = await loadOffMenuItems(resolved.offMenu);
+      }
       const collectionsByProductId = Object.fromEntries(
         uniqueProductIds.map((pid) => [pid, availableCollections])
       ) as Record<string, typeof availableCollections>;
       const bundleProductRangesByProductId = Object.fromEntries(
         uniqueProductIds.map((pid, i) => [pid, bundleProductInfoList[i].quantityRanges])
-      ) as Record<string, number[][]>;
+      ) as Record<string, QuantityRange[]>;
 
       activeBundle = {
         charge,
@@ -402,6 +481,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
         subscriptionTitles,
         collectionsByProductId,
         bundleProductRangesByProductId,
+        offMenuItems,
         eligibleCollectionIds: [...new Set(eligibleCollectionIds)],
         hasPresetForWeek,
       };
@@ -520,9 +600,7 @@ export async function action({ params, request }: ActionFunctionArgs) {
     if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "update_bundle" as const }, { status: 403 });
     }
-    const items = JSON.parse(rawItems) as Array<
-      Pick<BundleSelectionItem, "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity">
-    >;
+    const items = JSON.parse(rawItems) as BundleItemPayload[];
     try {
       await updateBundleSelection(Number(rawId), items);
       return json({ success: true, intent: "update_bundle" } as const);
@@ -555,9 +633,7 @@ export async function action({ params, request }: ActionFunctionArgs) {
     if (typeof scheduledAt === "string" && checkLockByScheduledAt(scheduledAt, bundleVariantId)) {
       return json({ error: LOCKED_ERROR, intent: "create_bundle" as const }, { status: 403 });
     }
-    const items = JSON.parse(rawItems) as Array<
-      Pick<BundleSelectionItem, "collection_id" | "collection_source" | "external_product_id" | "external_variant_id" | "quantity">
-    >;
+    const items = JSON.parse(rawItems) as BundleItemPayload[];
     try {
       await createBundleSelection(Number(rawChargeId), Number(rawPurchaseItemId), items);
       return json({ success: true, intent: "create_bundle" } as const);
@@ -972,7 +1048,9 @@ function WeekView({
   const primary = activeBundle.bundleSelections[0] ?? null;
   const isSkipped = charge.status === "skipped";
 
-  const initialCount = primary ? primary.items.reduce((sum, item) => sum + item.quantity, 0) : 0;
+  const initialCount = primary
+    ? [...primary.items, ...activeBundle.offMenuItems].reduce((sum, item) => sum + item.quantity, 0)
+    : 0;
   const [mealsSelected, setMealsSelected] = useState(initialCount);
   const [isPrefSaving, setIsPrefSaving] = useState(false);
 
@@ -1069,6 +1147,7 @@ function WeekView({
               key={primary.id}
               charge={charge}
               bundleSelection={primary}
+              offMenuItems={activeBundle.offMenuItems}
               availableCollections={primary.external_product_id ? (activeBundle.collectionsByProductId[primary.external_product_id] ?? []) : []}
               quantityRanges={quantityRanges}
               preferences={preferences}
@@ -1109,16 +1188,19 @@ function WeekView({
 // Derive the allowed meal-count envelope from a bundle's quantity ranges.
 // quantityRanges is a list of [min, max] pairs; we collapse it to the overall
 // min/max. Falls back to MEALS_PER_WEEK when the bundle exposes no ranges.
-function mealCountRange(quantityRanges: number[][]): { min: number; max: number } {
+// A range with no upper limit makes max Infinity.
+function mealCountRange(quantityRanges: QuantityRange[]): { min: number; max: number } {
   if (quantityRanges.length === 0) return { min: MEALS_PER_WEEK, max: MEALS_PER_WEEK };
   return {
     min: Math.min(...quantityRanges.map(([min]) => min)),
-    max: Math.max(...quantityRanges.map(([, max]) => max)),
+    max: Math.max(...quantityRanges.map(([, max]) => max ?? Infinity)),
   };
 }
 
-// Formats an allowed range for display: "3-5" for a range, "5" when fixed.
+// Formats an allowed range for display: "3-5" for a range, "5" when fixed,
+// "3+" when there's no upper limit.
 function mealRangeLabel(min: number, max: number): string {
+  if (!Number.isFinite(max)) return `${min}+`;
   return min === max ? `${max}` : `${min}-${max}`;
 }
 
@@ -1128,6 +1210,7 @@ function mealHelperText(count: number, min: number, max: number): string {
   // Fixed-size bundle (min === max): "at least" is misleading, so say exactly.
   if (count < min) return min === max ? `Select ${min} meals` : `Select at least ${min} meals`;
   if (count >= max) return "All meals selected";
+  if (!Number.isFinite(max)) return "Add as many meals as you like";
   const remaining = max - count;
   return `Add up to ${remaining} more ${remaining === 1 ? "meal" : "meals"}`;
 }
@@ -2562,7 +2645,8 @@ function WeekTabs({
 // ─── Meal grid (bundle editor) ────────────────────────────────────────────────
 
 type EditableItem = {
-  collection_id: string;
+  // null for a default meal that isn't in any bundle collection.
+  collection_id: string | null;
   collection_source: string;
   external_product_id: string;
   external_variant_id: string;
@@ -2572,6 +2656,9 @@ type EditableItem = {
   imageUrl: string | null;
   tags: string[];
   description: string | null;
+  // A default meal from outside the bundle's collections: it can be removed but
+  // not added to.
+  offMenu: boolean;
 };
 
 function matchesTags(itemTags: string[], prefTags: string[]): boolean {
@@ -2616,6 +2703,7 @@ function tierOf(item: EditableItem, preferences: CustomerPreference | null): num
 
 function buildEditableItems(
   bundleSelection: BundleSelection,
+  offMenuItems: EditableItem[],
   availableCollections: BundleCollection[],
   preferences: CustomerPreference | null,
   eligibleCollectionIds: Set<string>
@@ -2647,6 +2735,7 @@ function buildEditableItems(
           imageUrl: product.image_url ?? null,
           tags: product.tags ?? [],
           description: product.description ?? null,
+          offMenu: false,
         });
       }
     }
@@ -2665,9 +2754,12 @@ function buildEditableItems(
         imageUrl: null,
         tags: [],
         description: null,
+        offMenu: false,
       });
     }
   }
+
+  result.push(...offMenuItems);
 
   return result.sort((a, b) => tierOf(a, preferences) - tierOf(b, preferences));
 }
@@ -2677,6 +2769,7 @@ const MEALS_PER_WEEK = 5;
 function MealGrid({
   charge,
   bundleSelection,
+  offMenuItems,
   availableCollections,
   quantityRanges,
   preferences,
@@ -2689,8 +2782,9 @@ function MealGrid({
 }: {
   charge: Charge;
   bundleSelection: BundleSelection;
+  offMenuItems: EditableItem[];
   availableCollections: BundleCollection[];
-  quantityRanges: number[][];
+  quantityRanges: QuantityRange[];
   preferences: CustomerPreference | null;
   eligibleCollectionIds: string[];
   hasPresetForWeek: boolean;
@@ -2702,10 +2796,12 @@ function MealGrid({
   const fetcher = useFetcher<typeof action>();
   const eligibleSet = new Set(eligibleCollectionIds);
   const [items, setItems] = useState<EditableItem[]>(() =>
-    buildEditableItems(bundleSelection, availableCollections, preferences, eligibleSet)
+    buildEditableItems(bundleSelection, offMenuItems, availableCollections, preferences, eligibleSet)
   );
   const [savedQty, setSavedQty] = useState<Record<string, number>>(
-    () => Object.fromEntries(bundleSelection.items.map((i) => [i.external_variant_id, i.quantity]))
+    () => Object.fromEntries(
+      [...bundleSelection.items, ...offMenuItems].map((i) => [i.external_variant_id, i.quantity])
+    )
   );
   const [detailItem, setDetailItem] = useState<{ item: EditableItem; index: number } | null>(null);
   const [errorDismissed, setErrorDismissed] = useState(false);
@@ -2728,8 +2824,9 @@ function MealGrid({
 
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
   const { min: minMeals, max: maxMeals } = mealCountRange(quantityRanges);
+  const hasMaxMeals = Number.isFinite(maxMeals);
   const isValidTotal = quantityRanges.length > 0
-    ? quantityRanges.some(([min, max]) => totalItems >= min && totalItems <= max)
+    ? quantityRanges.some(([min, max]) => totalItems >= min && (max == null || totalItems <= max))
     : totalItems === MEALS_PER_WEEK;
 
   const hasChanges = items.some((item) => {
@@ -2752,11 +2849,13 @@ function MealGrid({
     onCountChange?.(totalItems);
   }, [totalItems, onCountChange]);
 
+  // Off-menu meals can't be added to, and removing one removes all of it.
+  const nextQty = (item: EditableItem, delta: number) =>
+    item.offMenu ? (delta < 0 ? 0 : item.quantity) : Math.max(0, item.quantity + delta);
+
   const adjustQty = (index: number, delta: number) => {
     setItems((prev) =>
-      prev.map((item, i) =>
-        i === index ? { ...item, quantity: Math.max(0, item.quantity + delta) } : item
-      )
+      prev.map((item, i) => (i === index ? { ...item, quantity: nextQty(item, delta) } : item))
     );
   };
 
@@ -2856,6 +2955,8 @@ function MealGrid({
           const isPrefExclude = Boolean(preferences && matchesTags(item.tags, preferences.exclude));
 
           if (isPrefExclude) return null;
+          // A removed off-menu meal can't be added back, so stop showing it.
+          if (item.offMenu && !isSelected) return null;
 
           return (
             <div
@@ -2927,10 +3028,10 @@ function MealGrid({
                     }`}>
                       {item.quantity}
                     </span>
-                    <StepperTip tip={totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
+                    <StepperTip tip={item.offMenu ? "Not on this week's menu — you can only remove it" : totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
                       <button
-                        onClick={() => { if (totalItems < maxMeals) adjustQty(index, 1); }}
-                        disabled={totalItems >= maxMeals || isSaving}
+                        onClick={() => { if (!item.offMenu && totalItems < maxMeals) adjustQty(index, 1); }}
+                        disabled={item.offMenu || totalItems >= maxMeals || isSaving}
                         className="stepper-btn"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -2963,7 +3064,7 @@ function MealGrid({
             {/* Required zone: fills to minMeals */}
             <div
               className="relative h-full flex-none"
-              style={{ width: `${maxMeals > 0 ? (minMeals / maxMeals) * 100 : 100}%` }}
+              style={{ width: `${hasMaxMeals && maxMeals > 0 ? (minMeals / maxMeals) * 100 : 100}%` }}
             >
               <div
                 className="h-full transition-all duration-300"
@@ -2972,10 +3073,10 @@ function MealGrid({
                   backgroundColor: totalItems >= minMeals ? "#6aab28" : "#f59e0b",
                 }}
               />
-              {maxMeals > minMeals && <div className="absolute right-0 top-0 bottom-0 w-px bg-white/70 z-10" />}
+              {hasMaxMeals && maxMeals > minMeals && <div className="absolute right-0 top-0 bottom-0 w-px bg-white/70 z-10" />}
             </div>
             {/* Extra zone: fills from minMeals to maxMeals in a lighter green */}
-            {maxMeals > minMeals && (
+            {hasMaxMeals && maxMeals > minMeals && (
               <div className="flex-1 h-full">
                 <div
                   className="h-full transition-all duration-300"
@@ -2990,12 +3091,12 @@ function MealGrid({
           <div className="px-5 py-4 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <p className={`text-sm font-semibold tabular-nums ${isValidTotal ? "text-stone-700" : "text-amber-700"}`}>
-                {isValidTotal && totalItems >= maxMeals ? "🎉 " : ""}{totalItems}/{maxMeals} meals
+                {isValidTotal && totalItems >= maxMeals ? "🎉 " : ""}{hasMaxMeals ? `${totalItems}/${maxMeals}` : totalItems} meals
               </p>
               {!isValidTotal && minMeals > totalItems && (
                 <span className="text-xs text-stone-600">Pick at least {minMeals - totalItems} more</span>
               )}
-              {isValidTotal && totalItems < maxMeals && (
+              {isValidTotal && hasMaxMeals && totalItems < maxMeals && (
                 <span className="text-xs text-stone-500">You can add up to {maxMeals - totalItems} more</span>
               )}
               {savedOk && !hasChanges && (
@@ -3041,7 +3142,7 @@ function MealGrid({
         chargeIsQueued={chargeIsQueued}
         locked={locked}
         isSaving={isSaving}
-        onAdjust={(delta) => { adjustQty(detailItem.index, delta); setDetailItem(d => d ? { ...d, item: { ...d.item, quantity: Math.max(0, d.item.quantity + delta) } } : null); }}
+        onAdjust={(delta) => { adjustQty(detailItem.index, delta); setDetailItem(d => d ? { ...d, item: { ...d.item, quantity: nextQty(d.item, delta) } } : null); }}
         onClose={() => setDetailItem(null)}
       />
     )}
@@ -3262,8 +3363,8 @@ function MealDetailModal({
                 <span className={`text-lg font-bold tabular-nums min-w-[24px] text-center ${item.quantity > 0 ? "text-stone-900" : "text-stone-300"}`}>
                   {item.quantity}
                 </span>
-                <StepperTip tip={totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
-                  <button onClick={() => onAdjust(1)} disabled={totalItems >= maxMeals || isSaving} className="stepper-btn">
+                <StepperTip tip={item.offMenu ? "Not on this week's menu — you can only remove it" : totalItems >= maxMeals ? `Box is full — remove a meal to swap` : undefined}>
+                  <button onClick={() => onAdjust(1)} disabled={item.offMenu || totalItems >= maxMeals || isSaving} className="stepper-btn">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                       <path strokeLinecap="round" d="M12 6v12M6 12h12" />
                     </svg>

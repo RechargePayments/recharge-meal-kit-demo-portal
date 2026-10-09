@@ -91,6 +91,34 @@ export async function getCollectionProducts(collectionId: string): Promise<Shopi
   return z.array(ShopifyProductSchema).parse(data.products);
 }
 
+// Products keyed by the variant ids asked for. Variants that no longer exist
+// are left out.
+export async function getProductsByVariantIds(variantIds: string[]): Promise<Map<string, ShopifyProduct>> {
+  const unique = [...new Set(variantIds)];
+  const byVariant = new Map<string, ShopifyProduct>();
+  if (unique.length === 0) return byVariant;
+
+  const productIds = await Promise.all(
+    unique.map((id) =>
+      shopifyFetch<{ variant: { product_id: number } }>(`/variants/${id}.json?fields=product_id`)
+        .then((data) => data.variant.product_id)
+        .catch(() => null)
+    )
+  );
+  const ids = [...new Set(productIds.filter((id) => id != null))];
+  if (ids.length === 0) return byVariant;
+
+  const data = await shopifyFetch<{ products: unknown[] }>(
+    `/products.json?ids=${ids.join(",")}&fields=id,title,body_html,variants,image,tags&limit=250`
+  );
+  for (const product of z.array(ShopifyProductSchema).parse(data.products)) {
+    for (const variant of product.variants) {
+      if (unique.includes(String(variant.id))) byVariant.set(String(variant.id), product);
+    }
+  }
+  return byVariant;
+}
+
 export async function getCollectionCollects(
   collectionId: string
 ): Promise<Map<number, number>> {

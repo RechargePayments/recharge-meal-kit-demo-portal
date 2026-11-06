@@ -11,7 +11,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
-    "@rechargeapps/storefront-client": "^1.83.0",
+    "@rechargeapps/storefront-client": "^2.10.0",
     "@remix-run/node": "^2.16.0",
     "@remix-run/react": "^2.16.0",
     "@remix-run/serve": "^2.16.0",
